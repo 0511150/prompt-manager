@@ -1,0 +1,53 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
+import {resolve,join} from 'node:path';
+import {mkdtemp,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {contentVersion,diffWorkspace,LEASE_TTL_MS} from '../src/edit-protocol.js';
+
+test('per-file leases, independent concurrent saves, fencing, restart, history and legacy protection',async()=>{
+ const persist=await mkdtemp(join(tmpdir(),'prompt-editor-test-'));
+ // Clock control is in this test-only entry module, never in the deployed Worker.
+ const wrapper=`import worker from './worker.mjs';export {AuthGuard,AccessControl,WorkspaceEditor} from './worker.mjs';let offset=0;const clock=Date.now;Date.now=()=>clock()+offset;export default {fetch(request,env,ctx){if(new URL(request.url).pathname==='/__test_clock'){offset+=Number(new URL(request.url).searchParams.get('advance'));return Response.json({ok:true});}return worker.fetch(request,env,ctx);}};`;
+ const create=()=>new Miniflare({...convertV4MiniflareOptions({name:'editing-test',modules:[{type:'ESModule',path:resolve('dist/test-entry.mjs'),contents:wrapper},{type:'ESModule',path:resolve('dist/worker.mjs')}],compatibilityDate:'2026-10-19',durableObjects:{AUTH_GUARD:{className:'AuthGuard',useSQLite:true},ACCESS_CONTROL:{className:'AccessControl',useSQLite:true},WORKSPACE_EDITOR:{className:'WorkspaceEditor',useSQLite:true}},r2Buckets:['VAULTS'],durableObjectsPersist:persist,bindings:{ACCESS_PASSWORD:'local-editing-password-only'}}),resourcePersistencePath:join(persist,'resources'),isolatedResourcePersistencePath:join(persist,'isolated')});
+ let mf=create();const origin='https://editing.invalid';
+ const req=(path,{method='GET',body,cookie,extra={}}={})=>mf.dispatchFetch(origin+path,{method,headers:{Origin:origin,...(body?{'Content-Type':'application/json'}:{}),...(cookie?{Cookie:cookie}:{}),...extra},...(body?{body:JSON.stringify(body)}:{})});
+ const login=async()=>{const r=await req('/auth/login',{method:'POST',body:{password:'local-editing-password-only'}});assert.equal(r.status,200);return r.headers.get('Set-Cookie').split(';')[0];};
+ try{
+  const cookie=await login(),otherCookie=await login(),a=crypto.randomUUID(),b=crypto.randomUUID();
+  const read=async client=>{const r=await req('/api/edit/state?client='+client,{cookie});assert.equal(r.status,200);return r.json();};
+  const first=await read(a);assert.equal(first.state.version,1);assert.match(first.workspaceId,/^[a-f0-9]{64}$/);
+  const lease=async(client,id,base=first.state.prompts.find(p=>p.id===id),token,c= cookie)=>req('/api/edit/lease',{method:'POST',cookie:c,body:{action:'acquire',client,document:id,baseVersion:await contentVersion(base),token}});
+  assert.equal((await req('/api/edit/state?client='+a)).status,401);
+  assert.equal((await req('/api/edit/lease',{method:'POST',cookie,body:{action:'acquire',client:'bad',document:'email'}})).status,400);
+  const grant=await lease(a,'email');assert.equal(grant.status,200);const lockA=await grant.json();
+  assert.equal((await lease(b,'email')).status,423,'only this file is excluded');
+  const grantB=await lease(b,'review');assert.equal(grantB.status,200);const lockB=await grantB.json();
+  const visible=await read(b);assert(visible.locks.some(x=>x.id==='email'&&!x.owned));assert(visible.locks.some(x=>x.id==='review'&&x.owned));assert(!JSON.stringify(visible).includes(lockA.token),'snapshots never disclose another page token');
+  const save=async(client,before,id,body,token,c=cookie)=>{const next=structuredClone(before);next.prompts.find(p=>p.id===id).body=body;return req('/api/edit/save',{method:'POST',cookie:c,body:{client,changes:diffWorkspace(before,next),leases:{[id]:token}}});};
+  assert.equal((await save(b,first.state,'email','stolen token',lockA.token)).status,423);
+  assert.equal((await save(a,first.state,'email','wrong session',lockA.token,otherCookie)).status,423);
+  const legacy=structuredClone(first.state);legacy.prompts.find(p=>p.id==='email').body='legacy overwrite';assert.equal((await req('/api/workspace',{method:'PUT',cookie,body:legacy,extra:{'X-Workspace-Revision':first.etag}})).status,423);
+  const saves=await Promise.all([save(a,first.state,'email','A edits email',lockA.token),save(b,first.state,'review','B edits review',lockB.token)]);for(const r of saves)assert.equal(r.status,200,await r.clone().text());
+  let latest=await read(a);assert.equal(latest.state.prompts.find(p=>p.id==='email').body,'A edits email');assert.equal(latest.state.prompts.find(p=>p.id==='review').body,'B edits review');assert.equal(latest.locks.length,0,'saving releases only the saved files');
+  assert.equal((await save(a,first.state,'email','A edits email',lockA.token)).status,200,'lost-response retry is idempotent');
+  assert.equal((await lease(b,'email')).status,409,'old versions cannot acquire edit rights');
+  const granted=await lease(a,'email',latest.state.prompts.find(p=>p.id==='email'));assert.equal(granted.status,200);const oldToken=(await granted.json()).token;
+  const renewed=await lease(a,'email',latest.state.prompts.find(p=>p.id==='email'));assert.equal(renewed.status,200);const newToken=(await renewed.json()).token;assert.notEqual(oldToken,newToken);
+  assert.equal((await save(a,latest.state,'email','stale grant',oldToken)).status,423,'replaced fencing token cannot save');
+  const history=await (await req('/api/history',{cookie})).json();assert(history.items.length>=1);
+  const archived=await (await req('/api/history/'+history.items.at(-1).id,{cookie})).json(),restoredFile=diffWorkspace(latest.state,archived.state).find(x=>x.group==='prompts').id;
+  if(restoredFile!=='email')assert.equal((await lease(b,restoredFile,latest.state.prompts.find(p=>p.id===restoredFile))).status,200);
+  assert.equal((await req('/api/history/'+history.items.at(-1).id+'/restore',{method:'POST',cookie,extra:{'X-Workspace-Revision':latest.etag}})).status,423,'restore cannot replace a leased file');
+  const stub=(await mf.getDurableObjectNamespace('WORKSPACE_EDITOR')).getByName('private-workspace'),row=await stub.lease('email');assert.equal(row.token,newToken);
+  await mf.dispose();mf=create();const restarted=(await mf.getDurableObjectNamespace('WORKSPACE_EDITOR')).getByName('private-workspace');assert.equal((await restarted.lease('email')).token,newToken,'lease is persisted in SQLite across restart');
+  assert.equal((await lease(b,'email',latest.state.prompts.find(p=>p.id==='email'))).status,423);
+  await req('/__test_clock?advance='+(LEASE_TTL_MS+1000));
+  const expiredGrant=await lease(b,'email',latest.state.prompts.find(p=>p.id==='email'));assert.equal(expiredGrant.status,200);const takeover=(await expiredGrant.json()).token;
+  assert.equal((await save(a,latest.state,'email','expired owner overwrite',newToken)).status,423);
+  assert.equal((await save(b,latest.state,'email','new owner after expiry',takeover)).status,200);
+  const bucket=await mf.getR2Bucket('VAULTS'),objects=await bucket.list();assert(objects.objects.every(x=>x.key==='workspace/current.json'||x.key.startsWith('workspace/history/')),'no lock, code or local-draft objects are stored in R2');
+  for(const object of objects.objects)assert(!(await (await bucket.get(object.key)).text()).includes('new owner after expiry'),'R2 contents stay encrypted');
+ }finally{await mf.dispose();await rm(persist,{recursive:true,force:true});}
+});

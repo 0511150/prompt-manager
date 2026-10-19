@@ -1,10 +1,11 @@
 import assets from './assets.generated.mjs';
 import {validateState} from './model.js';
 import {createSession,verifySession,sealWorkspace,unsealWorkspace} from './server-crypto.mjs';
-import {readWorkspace,saveWorkspace,listHistory,readHistory,restoreHistory,pruneHistory} from './workspace-store.mjs';
+import {readWorkspace,listHistory,readHistory,pruneHistory} from './workspace-store.mjs';
 import {normalizeIp} from './ip.js';
 export {AuthGuard} from './auth-guard.mjs';
 export {AccessControl} from './access-control.mjs';
+export {WorkspaceEditor} from './workspace-editor.mjs';
 const security={'X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY','Strict-Transport-Security':'max-age=31536000','Permissions-Policy':'camera=(), microphone=(), geolocation=()','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"};
 const json=(value,status=200,headers={})=>Response.json(value,{status,headers:{...security,'Cache-Control':'no-store',...headers}});
 const cookieName='__Host-prompt_session';
@@ -44,8 +45,8 @@ async function workspace(request,env,ctx){
  if(request.method==='GET'){const {state,etag}=await readWorkspace(env);return json(state,200,{'ETag':etag});}
  if(request.method!=='PUT')return json({error:'方法不支持'},405);
  const revision=request.headers.get('X-Workspace-Revision');if(!revision)return json({error:'请先读取最新版本'},428);
- const result=await saveWorkspace(env,await readJson(request),revision,request.headers.get('X-Workspace-Change')==='import'?'import':'edit');
- ctx.waitUntil(pruneHistory(env,result.droppedKeys).catch(()=>console.error(JSON.stringify({event:'history_cleanup_deferred'}))));
+ const result=await env.WORKSPACE_EDITOR.getByName('private-workspace').replace(await readJson(request),revision,request.headers.get('X-Workspace-Change')==='import'?'import':'edit');
+ if(result.error)return json(result,result.status||500);
  return json({ok:true,historyCount:result.historyCount},200,{'ETag':result.etag});
 }
 export default {async fetch(request,env,ctx){
@@ -61,6 +62,18 @@ export default {async fetch(request,env,ctx){
   if(!['GET','HEAD'].includes(request.method)&&!sameOrigin(request))return json({error:'请求来源不允许'},403);
   if(path==='/auth/logout'&&request.method==='POST'){await readBody(request,2048);await env.AUTH_GUARD.getByName('session:'+session.id).revoke();return json({ok:true},200,{'Set-Cookie':clearCookie});}
   if(path==='/api/workspace')return await workspace(request,env,ctx);
+  if(path==='/api/edit/state'&&request.method==='GET'){
+   const client=url.searchParams.get('client');if(!/^[a-f0-9-]{36}$/.test(client||''))return json({error:'页面标识无效'},400);
+   const result=await env.WORKSPACE_EDITOR.getByName('private-workspace').snapshot({client,session:session.id});return json(result,result.status||200);
+  }
+  if(path==='/api/edit/lease'&&request.method==='POST'){
+   const body=await readJson(request,4096);if(!/^[a-f0-9-]{36}$/.test(body.client||''))return json({error:'页面标识无效'},400);
+   const result=await env.WORKSPACE_EDITOR.getByName('private-workspace').edit(body.action,body.document,{client:body.client,session:session.id},body.token,body.baseVersion);return json(result,result.status||200);
+  }
+  if(path==='/api/edit/save'&&request.method==='POST'){
+   const body=await readJson(request,10*1024*1024);if(!/^[a-f0-9-]{36}$/.test(body.client||''))return json({error:'页面标识无效'},400);
+   const result=await env.WORKSPACE_EDITOR.getByName('private-workspace').save(body,{client:body.client,session:session.id});return json(result,result.status||200);
+  }
   if(path==='/api/security'&&request.method==='GET')return json(await env.ACCESS_CONTROL.getByName('workspace-access').list(clientIp(request)));
   if(path==='/api/security'&&request.method==='POST'){
    const body=await readJson(request,2048);
@@ -73,8 +86,8 @@ export default {async fetch(request,env,ctx){
   if(historyRoute&&request.method==='GET'&&!historyRoute[2])return json(await readHistory(env,historyRoute[1]));
   if(historyRoute&&historyRoute[2]&&request.method==='POST'){
    const revision=request.headers.get('X-Workspace-Revision');if(!revision)return json({error:'请先读取最新版本'},428);
-   const result=await restoreHistory(env,historyRoute[1],revision);
-   ctx.waitUntil(pruneHistory(env,result.droppedKeys).catch(()=>console.error(JSON.stringify({event:'history_cleanup_deferred'}))));
+   const result=await env.WORKSPACE_EDITOR.getByName('private-workspace').replace(null,revision,'restore',historyRoute[1]);
+   if(result.error)return json(result,result.status||500);
    return json({state:result.state,historyCount:result.historyCount},200,{'ETag':result.etag});
   }
   if(path==='/api/backup'&&request.method==='POST'){const state=validateState(await readJson(request));return json({app:'prompt-workspace',format:2,encrypted:true,payload:await sealWorkspace(state,env.DATA_KEY)});}

@@ -1,0 +1,36 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {EditingClient} from '../src/editing-client.js';
+import {EDIT_IDLE_MS,contentVersion,overlayChanges} from '../src/edit-protocol.js';
+import {freshState} from '../src/model.js';
+
+class DraftMemory{rows=new Map();async put(row){this.rows.set(row.id,structuredClone(row));}async remove(id){this.rows.delete(id);}async list(scope){return [...this.rows.values()].filter(row=>row.scope===scope).map(row=>structuredClone(row));}}
+function fixture(){let clock=1000,connected=true,cloud=freshState(),state=null,commits=0,dropResponse=false,paused=false,holdRead=false,releaseRead=null;const drafts=new DraftMemory(),tokens=new Map(),timers={setTimeout:()=>1,clearTimeout(){},setInterval:()=>1,clearInterval(){}};
+ const error=(status,document)=>Object.assign(Error('test error'),{status,data:{document}});
+ const request=async(path,options={})=>{if(!connected)throw TypeError('offline');const body=options.body?JSON.parse(options.body):null;if(path.startsWith('/api/edit/state')){const response=Response.json({state:cloud,etag:'"'+commits+'"',workspaceId:'test-scope',locks:[]});if(holdRead){holdRead=false;await new Promise(resolve=>{releaseRead=resolve;});}return response;}if(path==='/api/edit/lease'){if(body.action==='acquire'){if(body.baseVersion!==await contentVersion(cloud.prompts.find(p=>p.id===body.document)||null))throw error(409,body.document);tokens.set(body.document,crypto.randomUUID());return Response.json({token:tokens.get(body.document),until:clock+150000});}if(body.action==='release')tokens.delete(body.document);return Response.json({until:clock+150000});}if(path==='/api/edit/save'){for(const change of body.changes.filter(x=>x.group==='prompts'))assert.equal(body.leases[change.id],tokens.get(change.id));cloud=overlayChanges(cloud,body.changes);commits++;for(const change of body.changes)tokens.delete(change.id);if(dropResponse){dropResponse=false;throw TypeError('response lost');}return Response.json({state:cloud,etag:'"'+commits+'"'});}throw Error(path);};
+ const client=new EditingClient({request,getState:()=>state,setState:next=>{state=next;},drafts,now:()=>clock,online:()=>connected,pause:()=>paused,timers});return {client,drafts,get state(){return state;},get cloud(){return cloud;},get commits(){return commits;},advance:ms=>{clock+=ms;},offline:()=>{connected=false;client.offline=true;},online:()=>{connected=true;},drop:()=>{dropResponse=true;},pause:()=>{paused=true;},resume:()=>{paused=false;},hold:()=>{holdRead=true;},releaseRead:()=>releaseRead(),otherEdit:(id,text)=>{cloud.prompts.find(p=>p.id===id).body=text;}};
+}
+test('idle save is measured per file and releases ownership after the cloud acknowledgment',async()=>{
+ const f=fixture(),c=f.client;await c.boot();await c.startEdit('email');f.state.prompts.find(p=>p.id==='email').body='first file draft';c.changed();await c.persist();
+ f.advance(EDIT_IDLE_MS-1000);await c.startEdit('review');f.state.prompts.find(p=>p.id==='review').body='second file draft';c.changed();await c.flush({all:false});assert.equal(f.commits,0,'typing and navigation do not trigger an early file save');
+ f.advance(1000);await c.flush({all:false});assert.equal(f.commits,1);assert.equal(f.cloud.prompts.find(p=>p.id==='email').body,'first file draft');assert.notEqual(f.cloud.prompts.find(p=>p.id==='review').body,'second file draft');assert(!c.owned('email'));assert(c.owned('review'));assert(c.dirty);
+ await c.flush();assert.equal(f.commits,2);assert(!c.dirty);assert.equal((await f.drafts.list('test-scope')).length,0);c.dispose();
+});
+test('offline drafts survive a page and stale reconnection preserves both cloud and local text',async()=>{
+ const f=fixture(),c=f.client;await c.boot();await c.startEdit('email');f.offline();f.state.prompts.find(p=>p.id==='email').body='offline local text';c.changed();await c.persist();await c.flush();assert.equal(f.commits,0);const record=(await f.drafts.list('test-scope'))[0];assert.equal(record.changes[0].after.body,'offline local text');
+ f.otherEdit('email','new text from another device');f.online();await c.reconnect();assert.equal(f.commits,0);assert(c.conflicted);assert.equal(f.state.prompts.find(p=>p.id==='email').body,'offline local text');assert.equal(f.cloud.prompts.find(p=>p.id==='email').body,'new text from another device');assert(!c.editable('email'));
+ await c.saveCopy('email');assert.equal(f.cloud.prompts.find(p=>p.id==='email').body,'new text from another device');assert(f.cloud.prompts.some(p=>p.id!=='email'&&p.body==='offline local text'));c.dispose();
+});
+test('a lost save response is recovered without overwriting or creating a second history write',async()=>{
+ const f=fixture(),c=f.client;await c.boot();await c.startEdit('review');f.state.prompts.find(p=>p.id==='review').body='saved before response loss';c.changed();f.drop();await c.flush();assert(c.dirty);assert.equal(f.commits,1);await c.reconnect();assert(!c.dirty);assert.equal(f.commits,1);assert.equal((await f.drafts.list('test-scope')).length,0);c.dispose();
+});
+test('recovering a stored page draft uses its original base instead of silently rebasing over new text',async()=>{
+ const f=fixture(),c=f.client;await c.boot();const before=structuredClone(f.state.prompts.find(p=>p.id==='email')),after={...before,body:'draft from a closed page'};await f.drafts.put({id:'old-page',scope:'test-scope',savedAt:1,changes:[{group:'prompts',id:'email',before,after}]});f.otherEdit('email','cloud changed while page closed');await c.readDrafts();await c.recover('old-page');assert(c.conflicted);assert.equal(f.state.prompts.find(p=>p.id==='email').body,'draft from a closed page');assert.equal(f.commits,0);assert((await f.drafts.list('test-scope')).some(x=>x.id==='old-page'));c.dispose();
+});
+
+test('an older read response cannot roll back a newly acknowledged save',async()=>{
+ const f=fixture(),c=f.client;await c.boot();f.hold();const reading=c.refresh();await c.startEdit('email');f.state.prompts.find(p=>p.id==='email').body='newly saved text';c.changed();await c.flush();f.releaseRead();await reading;assert.equal(f.state.prompts.find(p=>p.id==='email').body,'newly saved text');assert(!c.dirty);c.dispose();
+});
+test('a form in progress defers background rebasing and resumes idle save after closing',async()=>{
+ const f=fixture(),c=f.client;await c.boot();await c.startEdit('email');f.state.prompts.find(p=>p.id==='email').body='draft with a form open';c.changed();f.pause();f.advance(EDIT_IDLE_MS);await c.flush({all:false});assert.equal(f.commits,0);assert(c.dirty);f.resume();await c.flush({all:false});assert.equal(f.commits,1);assert(!c.dirty);c.dispose();
+});

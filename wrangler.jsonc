@@ -9,11 +9,13 @@
   "r2_buckets": [{"binding": "VAULTS", "bucket_name": "prompt-manager-vaults"}],
   "durable_objects": {"bindings": [
     {"name": "AUTH_GUARD", "class_name": "AuthGuard"},
-    {"name": "ACCESS_CONTROL", "class_name": "AccessControl"}
+    {"name": "ACCESS_CONTROL", "class_name": "AccessControl"},
+    {"name": "WORKSPACE_EDITOR", "class_name": "WorkspaceEditor"}
   ]},
   "exports": {
     "AuthGuard": {"type": "durable-object", "storage": "sqlite"},
-    "AccessControl": {"type": "durable-object", "storage": "sqlite"}
+    "AccessControl": {"type": "durable-object", "storage": "sqlite"},
+    "WorkspaceEditor": {"type": "durable-object", "storage": "sqlite"}
   },
   "triggers": {"crons": ["0 * * * *"]},
   "observability": {"enabled": true, "logs": {"enabled": true, "invocation_logs": false}, "traces": {"enabled": true, "head_sampling_rate": 0.01}}

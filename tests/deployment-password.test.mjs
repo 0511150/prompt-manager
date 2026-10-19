@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {Miniflare,convertV4MiniflareOptions} from 'miniflare';
 import {resolve} from 'node:path';
 
-const create=bindings=>new Miniflare(convertV4MiniflareOptions({name:'deployment-validation',modules:true,scriptPath:resolve('dist/worker.mjs'),compatibilityDate:'2026-10-19',durableObjects:{AUTH_GUARD:{className:'AuthGuard',useSQLite:true},ACCESS_CONTROL:{className:'AccessControl',useSQLite:true}},r2Buckets:['VAULTS'],bindings}));
+const create=bindings=>new Miniflare(convertV4MiniflareOptions({name:'deployment-validation',modules:true,scriptPath:resolve('dist/worker.mjs'),compatibilityDate:'2026-10-19',durableObjects:{AUTH_GUARD:{className:'AuthGuard',useSQLite:true},ACCESS_CONTROL:{className:'AccessControl',useSQLite:true},WORKSPACE_EDITOR:{className:'WorkspaceEditor',useSQLite:true}},r2Buckets:['VAULTS'],bindings}));
 
 test('missing or short deployment passwords never expose the app or create credentials',async()=>{
  for(const bindings of [{},{ACCESS_PASSWORD:'too-short'}]){
