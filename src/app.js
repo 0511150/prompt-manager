@@ -54,18 +54,23 @@ $('#app').innerHTML=`<aside class="sidebar"><div class="brand">${icon('layers',2
 renderSidebar();renderTabs();renderBookmarks();renderDocument();setStatus(status);}
 function openPrompt(id){if(!state.prompts.some(p=>p.id===id))return;if(!state.tabs.includes(id))state.tabs.push(id);state.active=id;document.body.classList.remove('sidebar-open');renderTabs();renderSidebar();renderDocument();changed();document.querySelectorAll('details[open]').forEach(d=>d.open=false);}
 function newPrompt(folder=selectedFolder){const p={id:uid(),folder,title:'New Tab',body:'',values:{},updated:Date.now()};state.prompts.push(p);openPrompt(p.id);setTimeout(()=>{$('#document-title')?.focus();$('#document-title')?.select();},20);}
-function modal(html,onSubmit){closeFolderMenu();const dialog=$('#modal');dialog.innerHTML=html;dialog.onclose=null;dialog.oncancel=null;dialog.showModal();const form=dialog.querySelector('form');if(form)form.onsubmit=async e=>{e.preventDefault();await onSubmit?.(new FormData(form),form);};setTimeout(()=>dialog.querySelector('input:not([type="hidden"]),textarea,select,button')?.focus(),20);}
+let panelOrigin=null,panelReturnFocus=null,panelGeneration=0;
+function rememberPanelOrigin(trigger){const rect=trigger?.getBoundingClientRect();if(rect){panelOrigin={x:rect.left,y:rect.bottom+6};panelReturnFocus=trigger;}}
+function positionPanel(){const dialog=$('#modal');if(!dialog.open)return;const bounds=dialog.getBoundingClientRect(),edge=8,origin=panelOrigin||{x:innerWidth-bounds.width-20,y:60};dialog.style.left=Math.max(edge,Math.min(origin.x,innerWidth-bounds.width-edge))+'px';dialog.style.top=Math.max(edge,Math.min(origin.y,innerHeight-bounds.height-edge))+'px';}
+function closePanel(restoreFocus=false){panelGeneration++;$('#modal').close();if(restoreFocus&&panelReturnFocus?.isConnected)panelReturnFocus.focus({preventScroll:true});}
+function modal(html,onSubmit){closeFolderMenu();panelGeneration++;const dialog=$('#modal');dialog.innerHTML=html;dialog.onclose=null;dialog.oncancel=null;dialog.className='floating-panel';dialog.setAttribute('aria-label',dialog.querySelector('h2')?.textContent||'操作面板');if(!dialog.open)dialog.show();positionPanel();const form=dialog.querySelector('form');if(form)form.onsubmit=async e=>{e.preventDefault();await onSubmit?.(new FormData(form),form);};(dialog.querySelector('input:not([type="hidden"]),textarea,select')||dialog.querySelector('button'))?.focus({preventScroll:true});}
 const modalHead=(title,subtitle='')=>`<div class="modal-head"><div><h2>${esc(title)}</h2>${subtitle?`<p>${esc(subtitle)}</p>`:''}</div>${button('dismiss','','close','class="icon-button" aria-label="关闭"')}</div>`;
 const modalFoot=(label='保存')=>`<div class="modal-foot">${button('dismiss','取消',null)}<button class="primary" type="submit">${label}</button></div>`;
 function nameDialog(title,value,submit,extra=''){modal(`${modalHead(title)}<form><label class="form-field">名称<input name="name" required maxlength="120" value="${esc(value)}" autocomplete="off"></label>${extra}${modalFoot()}</form>`,async data=>{const name=data.get('name').trim();if(!name)return;submit(name,data);$('#modal').close();});}
 function confirmDialog(title,message,submit){modal(`${modalHead(title)}<p class="confirm-message">${esc(message)}</p><div class="modal-foot">${button('dismiss','取消',null)}${button('confirm-action','确认删除','trash','class="danger"')}</div>`);$('#modal').querySelector('[data-action="confirm-action"]').onclick=()=>{submit();$('#modal').close();};}
-function promptMenu(id){const p=state.prompts.find(x=>x.id===id);if(!p)return;modal(`${modalHead('管理 Prompt',p.title)}<div class="action-list">${button('rename-prompt','重命名','edit',`data-id="${id}"`)}${button('move-prompt','移动到文件夹','folder',`data-id="${id}"`)}${button('duplicate','创建副本','copy',`data-id="${id}"`)}${button('favorite','添加到收藏…','star',`data-id="${id}"`)}${button('delete-prompt','删除 Prompt','trash',`data-id="${id}" class="danger-text"`)}</div>`);}
+function promptMenu(id,anchor,point){const p=state.prompts.find(x=>x.id===id);if(!p)return;openFolderMenu(p.title||'New Tab',`${button('rename-prompt','重命名','edit',`data-id="${esc(id)}"`)}${button('move-prompt','移动到文件夹','folder',`data-id="${esc(id)}"`)}${button('duplicate','创建副本','copy',`data-id="${esc(id)}"`)}${button('favorite','添加到收藏…','star',`data-id="${esc(id)}"`)}<div class="context-menu-separator" role="separator"></div>${button('delete-prompt','删除 Prompt','trash',`data-id="${esc(id)}" class="danger-text"`)}`,anchor,point,'Prompt');}
+function bookmarkMenu(id,anchor,point){const b=state.bookmarks.find(x=>x.id===id),p=b&&state.prompts.find(x=>x.id===b.prompt);if(!p)return;const rect=anchor?.getBoundingClientRect(),summary=anchor?.closest('.bookmark-folder')?.querySelector('summary');document.querySelectorAll('.bookmark-folder[open]').forEach(el=>el.open=false);openFolderMenu(p.title||'New Tab',`${button('open','打开 Prompt','file',`data-id="${esc(p.id)}"`)}${button('favorite','编辑收藏位置','folder',`data-id="${esc(p.id)}"`)}<div class="context-menu-separator" role="separator"></div>${button('unfavorite','取消收藏','star',`data-id="${esc(id)}" class="danger-text"`)}`,summary||anchor,point||(rect?{x:rect.left,y:rect.bottom+4}:undefined),'收藏');}
 let folderMenuAnchor=null;
 function closeFolderMenu(restoreFocus=false){const anchor=folderMenuAnchor;$('#folder-context-menu')?.remove();folderMenuAnchor=null;anchor?.setAttribute('aria-expanded','false');if(restoreFocus&&anchor?.isConnected)anchor.focus({preventScroll:true});}
-function openFolderMenu(label,content,anchor,point){
+function openFolderMenu(label,content,anchor,point,kind='文件夹'){
  if($('#folder-context-menu')&&folderMenuAnchor===anchor&&!point){closeFolderMenu(true);return;}
- closeFolderMenu();folderMenuAnchor=anchor;anchor?.setAttribute('aria-haspopup','menu');anchor?.setAttribute('aria-expanded','true');
- const menu=document.createElement('div');menu.id='folder-context-menu';menu.className='folder-context-menu';menu.setAttribute('role','menu');menu.setAttribute('aria-label',label+'的文件夹菜单');menu.innerHTML=`<div class="context-menu-label">${esc(label)}</div>${content}`;document.body.append(menu);
+ closePanel();closeFolderMenu();folderMenuAnchor=anchor;anchor?.setAttribute('aria-haspopup','menu');anchor?.setAttribute('aria-expanded','true');
+ const menu=document.createElement('div');menu.id='folder-context-menu';menu.className='folder-context-menu';menu.setAttribute('role','menu');menu.setAttribute('aria-label',label+'的'+kind+'菜单');menu.innerHTML=`<div class="context-menu-label">${esc(label)}</div>${content}`;document.body.append(menu);
  const items=menu.querySelectorAll('button');items.forEach((item,index)=>{item.setAttribute('role','menuitem');item.tabIndex=index===0?0:-1;});
  const rect=anchor?.getBoundingClientRect(),bounds=menu.getBoundingClientRect(),edge=8;
  const x=point?.x??rect?.right??edge,y=point?.y??rect?.top??edge;
@@ -97,21 +102,23 @@ async function lockSpace(){await flush();if(dirty){if(conflict){await recoverCon
 function settingsDialog(){modal(`${modalHead('设置','私人工作区 · 数据与恢复')}<div class="settings-section"><div class="settings-heading">${icon('lock',20)}<div><h3>登录保护 · Fail2ban</h3><p>查看 IP 封禁、解除封禁，以及管理白名单。</p></div></div>${button('security','封禁管理与白名单','lock','class="primary settings-wide"')}</div><div class="settings-section"><div class="settings-heading">${icon('history',20)}<div><h3>修改记录</h3><p>R2 保留最近 100 个已保存的旧状态，当前状态另外保存。</p></div></div>${button('history','查看与恢复修改记录','history','class="primary settings-wide"')}<p class="inline-note">可以先预览再恢复。恢复包含所有 Prompt、文件夹、收藏和变量组合；恢复前的内容也会保留。</p></div><div class="settings-section"><div class="settings-heading">${icon('arrow',20)}<div><h3>本地文件</h3><p>手动导入从本机选择；手动备份下载到本机，不另存到 R2。</p></div></div><div class="settings-file-actions">${button('import','从本地导入','upload')}${button('export','下载本地备份','arrow')}</div></div><div class="settings-section settings-note">软件源码、构建产物和代码旧版本不存入 R2。R2 历史只保存你的工作区内容。</div><div class="modal-foot">${button('dismiss','关闭',null)}</div>`);}
 async function securityDialog(){
  modal(`${modalHead('登录保护 · Fail2ban','正在读取封禁与白名单…')}<p class="inline-note">正在加载…</p>`);
+ const generation=panelGeneration;
  try{
-  const data=await (await apiRequest('/api/security')).json(),now=Date.now();
+  const data=await (await apiRequest('/api/security')).json(),now=Date.now();if(generation!==panelGeneration||!$('#modal').open)return;
   modal(`${modalHead('登录保护 · Fail2ban','封禁统计和白名单独立保存，不占用工作区修改记录。')}<div class="security-rules">15 分钟内输错 5 次，临时封禁 15 分钟。滚动 24 小时内第 5 次触发封禁，转为永久封禁。成功登录清空该 IP 的统计。</div><div class="security-current"><span>当前 IP：<strong>${esc(data.currentIp)}</strong></span>${data.currentIp!=='unknown'?button('security-allow','加入白名单','plus',`data-id="${esc(data.currentIp)}"`):''}</div><h3 class="security-section-title">IP 白名单 <small>${data.whitelist.length}</small></h3><p class="inline-note">白名单只豁免封禁，仍须输入正确密码。支持单个 IPv4 / IPv6 地址。</p><form class="security-add"><input name="ip" aria-label="白名单 IP" placeholder="例如 203.0.113.10 或 2001:db8::1" required maxlength="64"><button type="submit" class="primary">添加</button></form><p class="form-error" id="security-error"></p><div class="security-list">${data.whitelist.map(row=>`<div class="security-row"><code>${esc(row.ip)}</code>${button('security-deny','移出白名单',null,`data-id="${esc(row.ip)}"`)}</div>`).join('')||'<p class="inline-note">还没有白名单 IP。</p>'}</div><h3 class="security-section-title">封禁与失败统计 <small>最近 1000 个 IP</small></h3><div class="security-list">${data.items.map(row=>`<div class="security-row"><div><code>${esc(row.ip)}</code><p class="${row.permanent?'danger-text':'muted'}">${row.permanent?'永久封禁':row.until>now?'临时封禁至 '+esc(historyTime(row.until)):'当前未封禁'} · 24 小时内触发 ${row.banTimes.length} 次 · 本轮失败 ${row.count} 次</p></div><div>${button('security-unban','解除 / 清空',null,`data-id="${esc(row.ip)}"`)}${button('security-allow','加白',null,`data-id="${esc(row.ip)}"`)}</div></div>`).join('')||'<p class="inline-note">没有封禁或失败记录。</p>'}</div><div class="modal-foot">${button('settings','返回设置',null)}${button('dismiss','关闭',null)}</div>`,async form=>{try{await updateSecurity('allow',form.get('ip'));}catch(e){$('#security-error').textContent=e.message;}});
- }catch(e){$('#modal').close();toast(e.message);}
+ }catch(e){if(generation===panelGeneration&&$('#modal').open){closePanel();toast(e.message);}}
 }
-async function updateSecurity(action,ip){await apiRequest('/api/security',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,ip})});await securityDialog();toast(action==='allow'?'已加入白名单并清空此 IP 的统计':action==='deny'?'已移出白名单':'已解除封禁并清空统计');}
+async function updateSecurity(action,ip){const generation=panelGeneration;await apiRequest('/api/security',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,ip})});if(generation===panelGeneration&&$('#modal').open)await securityDialog();toast(action==='allow'?'已加入白名单并清空此 IP 的统计':action==='deny'?'已移出白名单':'已解除封禁并清空统计');}
 function historyTime(timestamp){return timestamp?new Date(timestamp).toLocaleString('zh-CN',{hour12:false}):'尚未保存';}
 const historyReason=reason=>({edit:'修改前',import:'导入前',restore:'恢复前'}[reason]||'自动保存');
 async function historyDialog(){
- await flush();
+ const beforeFlush=panelGeneration;await flush();if(beforeFlush!==panelGeneration||!$('#modal').open)return;
  modal(`${modalHead('修改记录','正在读取 R2 中的工作区历史…')}<div class="history-list"><p class="inline-note">正在加载…</p></div>`);
- try{const r=await apiRequest('/api/history'),data=await r.json();modal(`${modalHead('修改记录',`已保留 ${data.items.length} / ${data.limit} 条 · 当前保存于 ${historyTime(data.currentSavedAt)}`)}<div class="history-explainer">仅内容修改产生记录。标签切换和文件夹展开不占用次数；超过 100 条时移除最旧记录。</div><div class="history-list">${data.items.map((item,index)=>`<div class="history-row"><div class="history-marker">${index===0?icon('history',17):'<span></span>'}</div><div class="history-info"><strong>${esc(historyTime(item.savedAt))}</strong><span>${esc(historyReason(item.reason))} · ${item.counts.prompts} 个 Prompt · ${item.counts.folders} 个文件夹 · ${item.counts.presets} 组变量</span></div>${button('history-preview','预览','eye',`data-id="${esc(item.id)}" class="primary-soft"`)}</div>`).join('')||'<div class="empty-dialog">还没有旧的修改记录。<br>工作区有内容更改并保存后，会自动保留先前版本。</div>'}</div><div class="modal-foot">${button('settings','返回设置',null)}${button('dismiss','关闭',null)}</div>`);}catch(e){$('#modal').close();toast(e.message);}
+ const generation=panelGeneration;
+ try{const r=await apiRequest('/api/history'),data=await r.json();if(generation!==panelGeneration||!$('#modal').open)return;modal(`${modalHead('修改记录',`已保留 ${data.items.length} / ${data.limit} 条 · 当前保存于 ${historyTime(data.currentSavedAt)}`)}<div class="history-explainer">仅内容修改产生记录。标签切换和文件夹展开不占用次数；超过 100 条时移除最旧记录。</div><div class="history-list">${data.items.map((item,index)=>`<div class="history-row"><div class="history-marker">${index===0?icon('history',17):'<span></span>'}</div><div class="history-info"><strong>${esc(historyTime(item.savedAt))}</strong><span>${esc(historyReason(item.reason))} · ${item.counts.prompts} 个 Prompt · ${item.counts.folders} 个文件夹 · ${item.counts.presets} 组变量</span></div>${button('history-preview','预览','eye',`data-id="${esc(item.id)}" class="primary-soft"`)}</div>`).join('')||'<div class="empty-dialog">还没有旧的修改记录。<br>工作区有内容更改并保存后，会自动保留先前版本。</div>'}</div><div class="modal-foot">${button('settings','返回设置',null)}${button('dismiss','关闭',null)}</div>`);}catch(e){if(generation===panelGeneration&&$('#modal').open){closePanel();toast(e.message);}}
 }
 async function previewHistory(id){
- const r=await apiRequest('/api/history/'+id);historyPreview=await r.json();const {item,state:snapshot}=historyPreview;
+ const generation=panelGeneration,r=await apiRequest('/api/history/'+id),data=await r.json();if(generation!==panelGeneration||!$('#modal').open)return;historyPreview=data;const {item,state:snapshot}=historyPreview;
  modal(`${modalHead('预览修改记录',historyTime(item.savedAt)+' · '+historyReason(item.reason))}<div class="history-preview-summary">${snapshot.prompts.length} 个 Prompt · ${snapshot.folders.length} 个文件夹 · ${snapshot.bookmarks.length} 个收藏 · ${snapshot.presets.length} 组变量</div><label class="form-field">预览 Prompt<select id="history-prompt-select">${snapshot.prompts.map(p=>`<option value="${esc(p.id)}">${esc(p.title||'New Tab')}</option>`).join('')}</select></label><textarea class="history-body" id="history-prompt-body" aria-label="历史 Prompt 内容" readonly></textarea><p class="inline-note">恢复将还原整个工作区，恢复前的当前内容也会进入修改记录。</p><div class="modal-foot">${button('history','返回记录',null)}${button('history-confirm','恢复此记录','history',`data-id="${esc(id)}" class="primary"`)}</div>`);
  renderHistoryPrompt();
 }
@@ -140,7 +147,7 @@ const actions={
  'delete-prompt':id=>{const p=state.prompts.find(x=>x.id===id);confirmDialog('删除 Prompt',`确认删除「${p.title}」及其收藏？此操作无法撤销。`,()=>{state.prompts=state.prompts.filter(x=>x.id!==id);state.bookmarks=state.bookmarks.filter(x=>x.prompt!==id);state.tabs=state.tabs.filter(x=>x!==id);if(state.active===id)state.active=state.tabs.at(-1)||null;changed();render();});},
  'favorite':favoriteDialog,'unfavorite':id=>{state.bookmarks=state.bookmarks.filter(b=>b.id!==id);changed();$('#modal').close();renderBookmarks();renderDocument();},
  'new-bookmark-folder':()=>nameDialog('新建收藏文件夹','',name=>{state.bookmarkFolders.push({id:uid(),name});changed();renderBookmarks();}),
- 'bookmark-menu':id=>{const b=state.bookmarks.find(b=>b.id===id);favoriteDialog(b.prompt);},
+ 'bookmark-menu':bookmarkMenu,
  'bookmark-folder-menu':bookmarkFolderMenu,
  'rename-bookmark-folder':id=>{const f=state.bookmarkFolders.find(x=>x.id===id);nameDialog('重命名收藏文件夹',f.name,name=>{f.name=name;changed();renderBookmarks();});},
  'delete-bookmark-folder':id=>confirmDialog('删除收藏文件夹','其中的收藏会保留并移回收藏栏。',()=>{state.bookmarks.filter(b=>b.folder===id).forEach(b=>b.folder=null);state.bookmarkFolders=state.bookmarkFolders.filter(f=>f.id!==id);changed();renderBookmarks();}),
@@ -148,7 +155,7 @@ const actions={
  'collapse-variables':()=>{variablesCollapsed=!variablesCollapsed;renderVariables();},'copy':copyPrompt,'presets':presetLibrary,'save-preset':()=>savePreset(),
  'edit-preset':savePreset,'apply-preset':id=>{const preset=state.presets.find(x=>x.id===id),p=current(),names=variableNames(p.body);const match=names.filter(k=>Object.hasOwn(preset.values,k));if(!match.length){toast('这个组合与当前 Prompt 没有同名变量');return;}for(const k of match)p.values[k]=preset.values[k];changed();renderVariables();preview();$('#modal').close();toast(`已填入 ${match.length} 个变量`);},
  'delete-preset':id=>confirmDialog('删除变量组合','删除后，已填入文档的变量值仍会保留。',()=>{state.presets=state.presets.filter(p=>p.id!==id);changed();setTimeout(presetLibrary,0);}),
- 'dismiss':()=>$('#modal').close(),
+ 'dismiss':()=>closePanel(true),
  'reload-workspace':bootWorkspace,
  'space':()=>modal(`${modalHead('私人工作区','单一工作区 · 访问密码保护')}<div class="space-detail">${icon('lock',32)}<h3>已连接 Cloudflare R2</h3><p>所有 Prompt、文件夹、收藏和变量组合都保存在同一个私人工作区中。<br>在其他设备输入访问密码即可使用。</p><p>登录有效期为 12 小时。点击退出会立即撤销当前登录。</p></div><div class="modal-foot">${button('settings','设置与修改记录','settings')}${button('sync','立即同步','refresh')}${button('lock','退出并锁定','lock','class="primary"')}</div>`),
  'lock':async()=>{$('#modal').close();await lockSpace();},
@@ -157,21 +164,28 @@ const actions={
  'export':exportBackup,'import':importBackup,'sidebar':()=>document.body.classList.toggle('sidebar-open'),
  'help':()=>modal(`${modalHead('一点小技巧，让 Prompt 更顺手')}<div class="help-content"><h3>整理与收藏</h3><p>左侧保存所有 Prompt，可拖进文件夹。文件夹的「⋯」支持子文件夹和移动。顶部收藏栏独立管理常用入口。</p><h3>模板变量</h3><p>用 <code>@@email@@</code> 标记变量。填写上方变量后，「复制成品」会替换所有占位符。</p><h3>组合库</h3><p>将一组变量保存为资料卡，支持多个身份、邮箱和场景。同名变量可一键填入任何 Prompt。</p><h3>编辑与公式</h3><p>支持 Markdown 编辑、预览和左右对照。行内公式使用 <code>$…$</code>，独立公式使用 <code>$$…$$</code>。</p><h3>私人工作区与同步</h3><p>输入访问密码后进入唯一工作区，修改自动保存至 R2。点击右上角同步可读取其他设备的最新内容。发生编辑冲突时停止同步，保护双方修改。</p><p>快捷键：<kbd>Ctrl/⌘ K</kbd> 查找，<kbd>Ctrl/⌘ S</kbd> 保存，<kbd>Ctrl/⌘ Alt N</kbd> 新建。</p></div>`)
 };
-document.addEventListener('pointerdown',e=>{const menu=$('#folder-context-menu');if(menu&&!menu.contains(e.target)&&!folderMenuAnchor?.contains(e.target))closeFolderMenu();},true);
-document.addEventListener('contextmenu',e=>{
- const row=e.target.closest('.folder-row'),bookmark=e.target.closest('[data-bookmark-folder]');
- if(row){e.preventDefault();folderMenu(row.closest('[data-drop-folder]').dataset.dropFolder,row.querySelector('[data-action="folder-menu"]'),{x:e.clientX,y:e.clientY});}
- else if(bookmark){e.preventDefault();bookmarkFolderMenu(bookmark.dataset.bookmarkFolder,bookmark.querySelector('summary'),{x:e.clientX,y:e.clientY});}
-});
+document.addEventListener('pointerdown',e=>{const menu=$('#folder-context-menu');if(menu&&!menu.contains(e.target)&&!folderMenuAnchor?.contains(e.target))closeFolderMenu();const panel=$('#modal');if(panel.open&&!panel.contains(e.target))closePanel();},true);
+function showContextMenu(target,point){
+ const row=target.closest('.folder-row'),prompt=target.closest('.tree-prompt'),bookmark=target.closest('.bookmark-item'),folder=target.closest('[data-bookmark-folder]'),tab=target.closest('.doc-tab');
+ if(row)folderMenu(row.closest('[data-drop-folder]').dataset.dropFolder,row.querySelector('[data-action="folder-menu"]'),point);
+ else if(prompt)promptMenu(prompt.dataset.dragPrompt,prompt.querySelector('[data-action="prompt-menu"]'),point);
+ else if(bookmark){const anchor=bookmark.querySelector('[data-action="bookmark-menu"]');bookmarkMenu(anchor.dataset.id,anchor,point);}
+ else if(folder)bookmarkFolderMenu(folder.dataset.bookmarkFolder,folder.querySelector('summary'),point);
+ else if(tab){const anchor=tab.querySelector('[data-action="open"]');promptMenu(anchor.dataset.id,anchor,point);}
+ else return false;
+ return true;
+}
+document.addEventListener('contextmenu',e=>{if(showContextMenu(e.target,{x:e.clientX,y:e.clientY}))e.preventDefault();});
 document.addEventListener('keydown',e=>{
- const menu=$('#folder-context-menu');if(!menu)return;
+ if(e.key==='ContextMenu'||(e.shiftKey&&e.key==='F10')){if(showContextMenu(e.target))e.preventDefault();return;}
+ const menu=$('#folder-context-menu');if(!menu){if(e.key==='Escape'&&$('#modal').open){e.preventDefault();closePanel(true);}return;}
  if(e.key==='Escape'){e.preventDefault();closeFolderMenu(true);return;}
  if(e.key==='Tab'){closeFolderMenu(true);return;}
  if(['ArrowDown','ArrowUp','Home','End'].includes(e.key)){e.preventDefault();const items=[...menu.querySelectorAll('[role="menuitem"]')],index=items.indexOf(document.activeElement);const next=e.key==='Home'?0:e.key==='End'?items.length-1:(index+(e.key==='ArrowDown'?1:-1)+items.length)%items.length;items.forEach((item,i)=>item.tabIndex=i===next?0:-1);items[next]?.focus();}
 });
-window.addEventListener('resize',()=>closeFolderMenu());
-document.addEventListener('scroll',e=>{if($('#folder-context-menu')&&!$('#folder-context-menu').contains(e.target))closeFolderMenu();},true);
-document.addEventListener('click',async e=>{const btn=e.target.closest('[data-action]');if(!btn)return;if(btn.closest('#folder-context-menu'))closeFolderMenu();try{await actions[btn.dataset.action]?.(btn.dataset.id,btn);}catch(error){console.error(error);toast(error.message||'操作未完成，请重试');}});
+window.addEventListener('resize',()=>{closeFolderMenu();positionPanel();});
+document.addEventListener('scroll',e=>{if($('#folder-context-menu')&&!$('#folder-context-menu').contains(e.target))closeFolderMenu();const panel=$('#modal');if(panel.open&&!panel.contains(e.target))closePanel();},true);
+document.addEventListener('click',async e=>{const btn=e.target.closest('[data-action]');if(!btn)return;const menu=btn.closest('#folder-context-menu');if(menu){const rect=menu.getBoundingClientRect();panelOrigin={x:rect.left,y:rect.top};panelReturnFocus=folderMenuAnchor;closeFolderMenu();}else if(!btn.closest('#modal'))rememberPanelOrigin(btn);try{await actions[btn.dataset.action]?.(btn.dataset.id,btn);}catch(error){console.error(error);toast(error.message||'操作未完成，请重试');}});
 document.addEventListener('input',e=>{const p=current();if(e.target.id==='search'){query=e.target.value;renderSidebar();return;}if(!p)return;if(e.target.id==='document-title'){p.title=e.target.value;p.updated=Date.now();changed();renderTabs();renderSidebar();renderBookmarks();return;}if(e.target.id==='editor'){const oldNames=variableNames(p.body).join('|');p.body=e.target.value;p.updated=Date.now();changed();if(oldNames!==variableNames(p.body).join('|'))renderVariables();updateStats();clearTimeout(previewTimer);previewTimer=setTimeout(preview,180);}if(e.target.hasAttribute('data-variable')){p.values[e.target.dataset.variable]=e.target.value;changed();clearTimeout(previewTimer);previewTimer=setTimeout(preview,180);}});
 document.addEventListener('change',e=>{if(e.target.id==='history-prompt-select')renderHistoryPrompt();if(e.target.id==='show-preset')$('#modal').querySelectorAll('.preset-fields input').forEach(el=>el.type=e.target.checked?'text':'password');});
 document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();$('#search')?.focus();}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='s'){e.preventDefault();flush();}if((e.ctrlKey||e.metaKey)&&e.altKey&&e.key.toLowerCase()==='n'){e.preventDefault();newPrompt();}if(e.key==='Tab'&&e.target.id==='editor'){e.preventDefault();document.execCommand('insertText',false,'  ');}});
@@ -182,5 +196,4 @@ document.addEventListener('drop',e=>{const folder=e.target.closest('[data-drop-f
 window.addEventListener('beforeunload',e=>{if(dirty&&session){e.preventDefault();e.returnValue='';}});
 window.addEventListener('online',()=>{if(dirty&&!conflict)flush();});
 document.addEventListener('visibilitychange',()=>{if(document.hidden&&dirty)flush();});
-$('#modal').addEventListener('click',e=>{if(e.target===$('#modal')){const r=e.target.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)e.target.close();}});
 bootWorkspace();
