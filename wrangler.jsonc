@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Canonical configuration for the Deploy to Cloudflare button.
+  "name": "prompt-manager",
+  "main": "dist/worker.mjs",
+  "compatibility_date": "2026-10-19",
+  "workers_dev": true,
+  "build": {"command": "node build.mjs"},
+  "r2_buckets": [{"binding": "VAULTS", "bucket_name": "prompt-manager-vaults"}],
+  "durable_objects": {"bindings": [
+    {"name": "AUTH_GUARD", "class_name": "AuthGuard"},
+    {"name": "ACCESS_CONTROL", "class_name": "AccessControl"}
+  ]},
+  "exports": {
+    "AuthGuard": {"type": "durable-object", "storage": "sqlite"},
+    "AccessControl": {"type": "durable-object", "storage": "sqlite"}
+  },
+  "triggers": {"crons": ["0 * * * *"]},
+  "observability": {"enabled": true, "logs": {"enabled": true, "invocation_logs": false}, "traces": {"enabled": true, "head_sampling_rate": 0.01}}
+}

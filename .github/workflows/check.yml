@@ -19,6 +19,7 @@ jobs:
       - run: npm ci
       - run: npm run setup:dev
       - run: npm run build
+      - run: npx wrangler deploy --dry-run --config wrangler.jsonc
       - run: npm audit --omit=dev
       - name: Test against the local Workers runtime
         shell: bash

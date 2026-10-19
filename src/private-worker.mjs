@@ -1,8 +1,10 @@
 import assets from './assets.generated.mjs';
-import {freshState,validateState} from './model.js';
-import {hash,hex,createSession,verifySession,sealWorkspace,unsealWorkspace} from './server-crypto.mjs';
-import {readWorkspace,saveWorkspace,listHistory,readHistory,restoreHistory,pruneHistory} from './workspace-store.mjs';
+import {validateState} from './model.js';
+import {createSession,verifySession,sealWorkspace,unsealWorkspace} from './server-crypto.mjs';
+import {CURRENT_KEY,readWorkspace,saveWorkspace,listHistory,readHistory,restoreHistory,pruneHistory} from './workspace-store.mjs';
+import {normalizeIp} from './ip.js';
 export {AuthGuard} from './auth-guard.mjs';
+export {AccessControl} from './access-control.mjs';
 const security={'X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY','Strict-Transport-Security':'max-age=31536000','Permissions-Policy':'camera=(), microphone=(), geolocation=()','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"};
 const json=(value,status=200,headers={})=>Response.json(value,{status,headers:{...security,'Cache-Control':'no-store',...headers}});
 const cookieName='__Host-prompt_session';
@@ -26,11 +28,30 @@ async function login(request,env){
  if(!sameOrigin(request))return json({error:'请求来源不允许'},403);
  if(typeof body.password!=='string'||body.password.length>512)return json({error:'密码格式不正确'},400);
  // CF-Connecting-IP is provided by Cloudflare; never use spoofable forwarding headers.
- const ip=request.headers.get('CF-Connecting-IP')||'unknown';
- const ipKey=hex(await hash(env.SESSION_SECRET+':ip:'+ip));
- const result=await env.AUTH_GUARD.getByName('ip:'+ipKey).attempt(body.password);
- if(!result.ok){if(result.banned)return json({error:`登录失败次数过多，请在 ${Math.ceil(result.retryAfter/60)} 分钟后重试。`,retryAfter:result.retryAfter},429,{'Retry-After':String(result.retryAfter)});return json({error:`密码不正确，还可尝试 ${result.remaining} 次。`},401);}
+ const result=await env.ACCESS_CONTROL.getByName('workspace-access').login(body.password,clientIp(request));
+ if(!result.ok)return failedLogin(result);
  const session=await createSession(env);return json({ok:true},200,{'Set-Cookie':setCookie(session.token)});
+}
+const clientIp=request=>normalizeIp(request.headers.get('CF-Connecting-IP'))||'unknown';
+function failedLogin(result){
+ if(result.status)return json({error:result.error},result.status);
+ if(result.unconfigured)return json({error:'请先完成首次设置'},409);
+ if(result.permanent)return json({error:'此 IP 已永久封禁，请从白名单 IP 登录后在设置中解除。',permanent:true},429);
+ if(result.banned)return json({error:`登录失败次数过多，请在 ${Math.ceil(result.retryAfter/60)} 分钟后重试。`,retryAfter:result.retryAfter},429,{'Retry-After':String(result.retryAfter)});
+ return json({error:result.whitelisted?'密码或初始化码不正确':`密码或初始化码不正确，还可尝试 ${result.remaining} 次。`},401);
+}
+async function setup(request,env){
+ if(request.method!=='POST')return json({error:'方法不支持'},405);
+ const body=await readJson(request,4096);
+ if(!sameOrigin(request))return json({error:'请求来源不允许'},403);
+ if(typeof body.password!=='string'||body.password.length<12||body.password.length>512||body.password!==body.confirm)return json({error:'请设置 12–512 字符密码，并确保两次输入一致'},400);
+ if(typeof body.token!=='string'||body.token.length>512)return json({error:'初始化码格式不正确'},400);
+ const control=env.ACCESS_CONTROL.getByName('workspace-access');
+ if(!await control.getCredentials()&&await env.VAULTS.head(CURRENT_KEY))return json({error:'检测到已有工作区，但登录配置缺失。请恢复原有凭据，不要重新初始化。'},503);
+ const result=await control.setup(body.token,body.password,clientIp(request));
+ if(!result.ok)return failedLogin(result);
+ const credentials=await control.getCredentials(),session=await createSession(credentials);
+ return json({ok:true},200,{'Set-Cookie':setCookie(session.token)});
 }
 async function workspace(request,env,ctx){
  if(request.method==='GET'){const {state,etag}=await readWorkspace(env);return json(state,200,{'ETag':etag});}
@@ -43,7 +64,16 @@ async function workspace(request,env,ctx){
 export default {async fetch(request,env,ctx){
  try{
   const url=new URL(request.url),path=url.pathname;
-  if(!env.ACCESS_PASSWORD_HASH||!env.SESSION_SECRET||!env.DATA_KEY)return json({error:'访问保护尚未配置，请联系管理员'},503);
+  if(path==='/auth/setup')return await setup(request,env);
+  const credentials=await env.ACCESS_CONTROL.getByName('workspace-access').getCredentials();
+  if(!credentials){
+   if(['GET','HEAD'].includes(request.method)){
+    if(['/', '/index.html'].includes(path))return assetResponse('/setup.html',request);
+    if(['/setup.js','/login.css'].includes(path))return assetResponse(path,request);
+   }
+   return json({error:'请先完成首次设置'},401);
+  }
+  env={...env,...credentials};
   if(path==='/auth/login')return await login(request,env);
   if(['GET','HEAD'].includes(request.method)&&(path==='/login.js'||path==='/login.css'))return assetResponse(path,request);
   const session=await sessionFor(request,env);
@@ -51,6 +81,13 @@ export default {async fetch(request,env,ctx){
   if(!['GET','HEAD'].includes(request.method)&&!sameOrigin(request))return json({error:'请求来源不允许'},403);
   if(path==='/auth/logout'&&request.method==='POST'){await readBody(request,2048);await env.AUTH_GUARD.getByName('session:'+session.id).revoke();return json({ok:true},200,{'Set-Cookie':clearCookie});}
   if(path==='/api/workspace')return await workspace(request,env,ctx);
+  if(path==='/api/security'&&request.method==='GET')return json(await env.ACCESS_CONTROL.getByName('workspace-access').list(clientIp(request)));
+  if(path==='/api/security'&&request.method==='POST'){
+   const body=await readJson(request,2048);
+   if(!['unban','allow','deny'].includes(body.action)||!normalizeIp(body.ip))return json({error:'操作或 IP 地址无效'},400);
+   const result=await env.ACCESS_CONTROL.getByName('workspace-access').update(body.action,body.ip);
+   return json(result,result.status||200);
+  }
   if(path==='/api/history'&&request.method==='GET')return json(await listHistory(env));
   const historyRoute=path.match(/^\/api\/history\/([a-f0-9-]{36})(\/restore)?$/);
   if(historyRoute&&request.method==='GET'&&!historyRoute[2])return json(await readHistory(env,historyRoute[1]));
@@ -67,4 +104,4 @@ export default {async fetch(request,env,ctx){
   if(path==='/login.html')return Response.redirect(url.origin+'/',303);
   return assetResponse(path==='/'?'/index.html':path,request);
  }catch(error){if(error.status)return json({error:error.message},error.status);console.error(JSON.stringify({event:'request_error',message:error?.name||'Error'}));return json({error:'操作未完成，请稍后重试'},500);}
-},async scheduled(_event,env,ctx){ctx.waitUntil(pruneHistory(env));}};
+},async scheduled(_event,env,ctx){ctx.waitUntil((async()=>{const control=env.ACCESS_CONTROL.getByName('workspace-access');await control.cleanup();const credentials=await control.getCredentials();if(credentials)await pruneHistory({...env,...credentials});})());}};

@@ -1,5 +1,11 @@
 # Prompt 私人工作台
 
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/0511150/prompt-manager)
+
+点击按钮，将应用部署到你自己的 Cloudflare 账号；需要先开通 R2。部署页面填写至少 24 字符、独一无二的随机 `SETUP_TOKEN` 初始化码。部署完成后打开网站，凭初始化码设置访问密码（至少 12 字符）。初始化码不等于访问密码，切勿使用公开的示例值。
+
+一键部署读取 `wrangler.jsonc`，默认部署命令为 `npm run deploy`；资源由 Cloudflare 创建和绑定。网站密码只保存 PBKDF2-SHA-256 加盐校验结果，会话密钥和数据加密密钥自动生成并持久化到 `AccessControl`。首次设置只能成功一次，并发提交也不能覆盖已设置的密码。
+
 基于 Cloudflare Workers、R2 和 Durable Objects 的单用户 Prompt 管理器。
 
 ## 功能
@@ -17,7 +23,7 @@
 
 ## 本机开发
 
-需要 Node.js 22.18 以上和 npm。Cloudflare CLI 已包含在开发依赖中。
+需要 Node.js 22.18 以上和 npm。Cloudflare CLI、Wrangler 和 Miniflare 已包含在开发依赖中。
 
 ```sh
 npm ci
@@ -40,7 +46,9 @@ npm audit --omit=dev
 
 ## 部署到 Cloudflare
 
-本项目使用 `cf` CLI 和 `cloudflare.config.ts`。首先登录：
+一键部署和新部署使用 `wrangler.jsonc`（不含个人账号或域名）。按钮中的部署流程会要求 `SETUP_TOKEN`；也可以先通过 `npx wrangler secret put SETUP_TOKEN` 设置初始化码后部署。
+
+现有基于 cf 的部署仍使用 `cloudflare.config.ts`，其更新命令为 `npm run deploy:cf`。继续更新旧部署前先登录：
 
 ```sh
 npx cf auth login
@@ -64,7 +72,7 @@ npm run build
 npx cf deploy --dry-run
 ```
 
-Worker 需要三个 Secret：
+以下配置仅用于兼容旧版部署；一键部署的新用户无需手动生成这三个 Secret：
 
 | Secret | 内容 |
 | --- | --- |
@@ -72,14 +80,14 @@ Worker 需要三个 Secret：
 | `SESSION_SECRET` | 至少 32 字节安全随机数据生成的会话签名密钥 |
 | `DATA_KEY` | 32 字节安全随机 AES 密钥的 Base64 编码 |
 
-首次部署时，在本机创建被 Git 忽略的 `.env.production.secrets` 文件，填入上述三个 Secret（`名称=值`，一行一个），再执行：
+维护旧版部署时，可在本机创建被 Git 忽略的 `.env.production.secrets` 文件，填入上述三个 Secret（`名称=值`，一行一个），再执行：
 
 ```sh
 npm run build
 npx cf deploy --secrets-file .env.production.secrets
 ```
 
-R2 桶与 Durable Object 由 CLI 按配置创建或绑定；账号需要开通 R2。之后常规更新使用 `npm run deploy`，会先重新构建前端。直接调用 `cf deploy` 时，应先运行 `npm run build`。
+R2 桶与 Durable Object 由 CLI 按配置创建或绑定；账号需要开通 R2。旧部署常规更新使用 `npm run deploy:cf`，会先重新构建前端。新部署使用 `npm run deploy`，由 Wrangler 的构建步骤生成资源。直接调用 `cf deploy` 时，应先运行 `npm run build`。
 
 **更新现有部署时，请继续使用原账号、Worker、R2 桶和自定义域名配置。不要替换 `DATA_KEY`。** 首次部署完成后，密钥应另行安全保管；不要加入 GitHub、Issue 或构建日志。
 
@@ -87,10 +95,14 @@ R2 桶与 Durable Object 由 CLI 按配置创建或绑定；账号需要开通 R
 
 - 未登录时，工作台页面、脚本、字体和数据接口由服务端阻止访问，仅公开登录所需资源。
 - Cookie 使用 Secure、HttpOnly、SameSite=Strict；会话最长有效期为 12 小时。
-- 15 分钟内输错 5 次，封禁来源 IP 15 分钟；重复触发指数延长，最多 24 小时。登录成功清零此 IP 的累计惩罚。
+- 15 分钟内输错 5 次，临时封禁来源 IP 15 分钟，每次时长固定。滚动 24 小时内第 5 次触发封禁，转为永久封禁。永久封禁需管理员从其他 IP 或白名单 IP 登录后手动解除。成功登录清空该 IP 的全部失败与封禁统计。
 - 使用 Cloudflare 提供的 `CF-Connecting-IP`，不信任客户端转发的 `X-Forwarded-For`。
 - 修改密码摘要会使现有会话失效；退出立即撤销当前会话。
 - ETag 条件写入防止多设备直接覆盖彼此的修改；冲突时可先导出本机内容再读取云端。
+
+在「设置 → 登录保护 · Fail2ban」可查看失败次数、最近 24 小时触发次数、临时/永久封禁状态，手动解除并清空记录，以及添加/移除白名单。白名单支持单个 IPv4 和 IPv6 地址，不支持通配符或网段；白名单仍须正确密码。添加白名单时会清空该 IP 的已有统计。
+
+新部署的密码校验、会话密钥、数据密钥与封禁/白名单均保存在 SQLite Durable Object 中，不占用 R2 历史。不要删除 `AccessControl` 数据或绑定，避免丢失访问凭据与解密密钥。旧部署继续使用原有的三个 Worker Secrets，升级不会重新初始化或更换密钥。
 
 详见 [安全说明](SECURITY.md)。服务器可解密工作区数据，本项目不提供端到端加密。
 
@@ -109,7 +121,8 @@ R2 桶与 Durable Object 由 CLI 按配置创建或绑定；账号需要开通 R
 - `src/app.js`：前端交互、预览与同步。
 - `src/model.js`：数据模型、验证和模板变量。
 - `src/private-worker.mjs`：门禁、工作区、备份和历史 API。
-- `src/auth-guard.mjs`、`src/ban-policy.mjs`：持久化登录失败计数与会话撤销。
+- `src/access-control.mjs`：首次设置、持久化凭据、IP 封禁与白名单。
+- `src/auth-guard.mjs`、`src/ban-policy.mjs`：会话撤销与封禁规则。
 - `src/workspace-store.mjs`：当前状态、100 条历史与并发条件写入。
 - `src/server-crypto.mjs`：会话签名和 AES-GCM 加密。
 - `public/`：页面、登录和样式。

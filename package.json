@@ -6,10 +6,10 @@
   "scripts": {
     "build": "node build.mjs",
     "test": "node --test --test-concurrency=1 tests/*.test.mjs",
-    "deploy": "cf deploy",
+    "deploy": "wrangler deploy",
     "dev": "node build.mjs && vite --host 127.0.0.1 --port 8787",
     "setup:dev": "node scripts/setup-dev.mjs",
-    "predeploy": "npm run build"
+    "deploy:cf": "npm run build && cf deploy"
   },
   "dependencies": {
     "dompurify": "^3.3.0",
@@ -20,7 +20,9 @@
     "@cloudflare/vite-plugin": "^2.0.0-beta.v.1",
     "cf": "1.0.0-beta.18",
     "esbuild": "^0.28.2",
-    "vite": "^8.3.4"
+    "miniflare": "^5.20261012.1-beta",
+    "vite": "^8.3.4",
+    "wrangler": "^4.151.1"
   },
   "allowScripts": {
     "esbuild": true,
@@ -28,5 +30,18 @@
   },
   "engines": {
     "node": ">=22.18.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "SETUP_TOKEN": {
+        "description": "首次初始化专用随机码，至少 24 字符。部署后用此码设置网站访问密码，防止陌生人抢先初始化。请勿使用示例值或公开此码。"
+      },
+      "VAULTS": {
+        "description": "存放加密的当前工作区与最近 100 个旧状态。"
+      },
+      "ACCESS_CONTROL": {
+        "description": "保存初始化凭据、IP 封禁和白名单。请勿删除此 Durable Object。"
+      }
+    }
   }
 }
