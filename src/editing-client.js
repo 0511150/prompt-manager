@@ -53,10 +53,10 @@ export class EditingClient{
  }
  rebase(remote,sent=[]){
   const local=this.getState(),pending=[];
-  for(const change of this.changes){const actual=remote[change.group].find(x=>x.id===change.id)||null,acknowledged=sent.find(x=>x.group===change.group&&x.id===change.id);if(sameItem(change.group,actual,change.after)||acknowledged&&sameItem(change.group,change.after,acknowledged.after))continue;pending.push(acknowledged?{...change,before:actual}:change);}
+  for(const change of this.changes){const actual=(remote[change.group]||[]).find(x=>x.id===change.id)||null,acknowledged=sent.find(x=>x.group===change.group&&x.id===change.id);if(sameItem(change.group,actual,change.after)||acknowledged&&sameItem(change.group,change.after,acknowledged.after))continue;pending.push(acknowledged?{...change,before:actual}:change);}
   const next=overlayChanges(remote,pending),base=structuredClone(remote);this.metadataConflict=false;
   for(const id of [...this.problems.keys()])if(!pending.some(x=>x.group==='prompts'&&x.id===id))this.problems.delete(id);
-  for(const change of pending){const actual=remote[change.group].find(x=>x.id===change.id)||null;if(!sameItem(change.group,actual,change.before)&&!sameItem(change.group,actual,change.after)){if(change.group==='prompts')this.problems.set(change.id,'conflict');else this.metadataConflict=true;}else if(change.group==='prompts')this.problems.delete(change.id);putItem(base,change.group,change.id,change.before);}
+  for(const change of pending){const actual=(remote[change.group]||[]).find(x=>x.id===change.id)||null;if(!sameItem(change.group,actual,change.before)&&!sameItem(change.group,actual,change.after)){if(change.group==='prompts')this.problems.set(change.id,'conflict');else this.metadataConflict=true;}else if(change.group==='prompts')this.problems.delete(change.id);putItem(base,change.group,change.id,change.before);}
   next.tabs=local.tabs.filter(id=>next.prompts.some(p=>p.id===id));next.active=next.prompts.some(p=>p.id===local.active)?local.active:next.tabs[0]||null;for(const f of next.folders){const old=local.folders.find(x=>x.id===f.id);if(old)f.open=old.open;}
   const changed=JSON.stringify(next)!==JSON.stringify(local);this.base=base;if(changed)this.setState(next);this.notify();
  }

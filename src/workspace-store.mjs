@@ -9,7 +9,7 @@ function decodeRecord(value,uploaded){
  throw Error('Unsupported workspace storage format');
 }
 function meaningful(state){return JSON.stringify({
- version:state.version,folders:state.folders.map(({open,...f})=>f),
+ version:state.version,promptOrders:state.promptOrders||[],folders:state.folders.map(({open,...f})=>f),
  prompts:state.prompts.map(({updated,...p})=>p),
  bookmarkFolders:state.bookmarkFolders,bookmarks:state.bookmarks,
  presets:state.presets.map(({updated,...p})=>p)
