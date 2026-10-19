@@ -33,14 +33,14 @@
   },
   "cloudflare": {
     "bindings": {
-      "SETUP_TOKEN": {
-        "description": "首次初始化专用随机码，至少 24 字符。部署后用此码设置网站访问密码，防止陌生人抢先初始化。请勿使用示例值或公开此码。"
-      },
       "VAULTS": {
         "description": "存放加密的当前工作区与最近 100 个旧状态。"
       },
       "ACCESS_CONTROL": {
-        "description": "保存初始化凭据、IP 封禁和白名单。请勿删除此 Durable Object。"
+        "description": "保存密码校验、会话与数据密钥、IP 封禁和白名单。请勿删除此 Durable Object。"
+      },
+      "ACCESS_PASSWORD": {
+        "description": "网站访问密码，直接在这里设置，至少 12 字符（最多 512 字符）。部署后用此密码登录，无需初始化码或网页首次设置。请使用独一无二的长密码，并作为 Secret 保存。"
       }
     }
   }

@@ -1,7 +1,8 @@
 import {DurableObject} from 'cloudflare:workers';
-import {passwordMatches,hash,hex,bytesToBase64,passwordVerifier} from './server-crypto.mjs';
+import {passwordMatches,hex,bytesToBase64,passwordVerifier} from './server-crypto.mjs';
 import {normalizeAttempts,failedAttempt,MAX_ATTEMPTS,banResult} from './ban-policy.mjs';
 import {normalizeIp} from './ip.js';
+import {CURRENT_KEY} from './workspace-store.mjs';
 
 // One coordinator for the single workspace's access policy, not workspace contents.
 export class AccessControl extends DurableObject{
@@ -11,11 +12,27 @@ export class AccessControl extends DurableObject{
   ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS ip_policy (ip TEXT PRIMARY KEY, value TEXT NOT NULL, last INTEGER NOT NULL)');
   ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS allowlist (ip TEXT PRIMARY KEY, added INTEGER NOT NULL)');
  }
- credentials(){
-  if(this.env.ACCESS_PASSWORD_HASH&&this.env.SESSION_SECRET&&this.env.DATA_KEY)return {ACCESS_PASSWORD_HASH:this.env.ACCESS_PASSWORD_HASH,SESSION_SECRET:this.env.SESSION_SECRET,DATA_KEY:this.env.DATA_KEY};
-  const row=this.ctx.storage.sql.exec('SELECT value FROM access_config WHERE id=1').toArray()[0];return row?JSON.parse(row.value):null;
+ storedCredentials(){const row=this.ctx.storage.sql.exec('SELECT value FROM access_config WHERE id=1').toArray()[0];return row?JSON.parse(row.value):null;}
+ legacyCredentials(){return this.env.ACCESS_PASSWORD_HASH&&this.env.SESSION_SECRET&&this.env.DATA_KEY?{ACCESS_PASSWORD_HASH:this.env.ACCESS_PASSWORD_HASH,SESSION_SECRET:this.env.SESSION_SECRET,DATA_KEY:this.env.DATA_KEY}:null;}
+ getCredentials(){
+  // Bindings do not change during an object's lifetime; derive once per instance.
+  if(!this.credentialsPromise)this.credentialsPromise=this.resolveCredentials().catch(error=>{this.credentialsPromise=null;throw error;});
+  return this.credentialsPromise;
  }
- getCredentials(){return this.credentials();}
+ async resolveCredentials(){
+  const stored=this.storedCredentials(),legacy=this.legacyCredentials(),previous=stored||legacy,password=this.env.ACCESS_PASSWORD;
+  if(password===undefined)return previous;
+  if(typeof password!=='string'||password.length<12||password.length>512)return null;
+  if(previous?.PASSWORD_SALT&&await passwordMatches(password,previous.ACCESS_PASSWORD_HASH,previous.PASSWORD_SALT))return previous;
+  if(!previous){
+   if(this.env.ACCESS_PASSWORD_HASH||this.env.SESSION_SECRET||this.env.DATA_KEY)throw Error('Incomplete legacy credentials');
+   if(await this.env.VAULTS.head(CURRENT_KEY))throw Error('Existing workspace without encryption credentials');
+  }
+  const PASSWORD_SALT=bytesToBase64(crypto.getRandomValues(new Uint8Array(16)));
+  const credentials={ACCESS_PASSWORD_HASH:hex(await passwordVerifier(password,PASSWORD_SALT)),PASSWORD_SALT,SESSION_SECRET:previous?.SESSION_SECRET||bytesToBase64(crypto.getRandomValues(new Uint8Array(32))),DATA_KEY:previous?.DATA_KEY||bytesToBase64(crypto.getRandomValues(new Uint8Array(32)))};
+  this.ctx.storage.sql.exec('INSERT OR REPLACE INTO access_config(id,value) VALUES(1,?)',JSON.stringify(credentials));
+  return credentials;
+ }
  readIp(ip,now=Date.now()){const row=this.ctx.storage.sql.exec('SELECT value FROM ip_policy WHERE ip=?',ip).toArray()[0];return normalizeAttempts(row?JSON.parse(row.value):null,now);}
  writeIp(ip,state){this.ctx.storage.sql.exec('INSERT OR REPLACE INTO ip_policy(ip,value,last) VALUES(?,?,?)',ip,JSON.stringify(state),state.last);}
  allowed(ip){return this.ctx.storage.sql.exec('SELECT ip FROM allowlist WHERE ip=?',ip).toArray().length>0;}
@@ -28,26 +45,10 @@ export class AccessControl extends DurableObject{
  clearIp(ip){this.ctx.storage.sql.exec('DELETE FROM ip_policy WHERE ip=?',ip);return {ok:true};}
  async login(password,ip){
   const blocked=this.blocked(ip);if(blocked)return blocked;
-  const credentials=this.credentials();if(!credentials)return {ok:false,unconfigured:true};
+  const credentials=await this.getCredentials();if(!credentials)return {ok:false,unconfigured:true};
   const valid=await passwordMatches(password,credentials.ACCESS_PASSWORD_HASH,credentials.PASSWORD_SALT);
   const later=this.blocked(ip);if(later)return later;
   if(!valid)return this.failure(ip);
-  this.clearIp(ip);return {ok:true};
- }
- async setup(token,password,ip){
-  if(this.credentials())return {ok:false,status:409,error:'工作区已完成初始化，不能重复设置'};
-  if(this.env.ACCESS_PASSWORD_HASH||this.env.SESSION_SECRET||this.env.DATA_KEY)return {ok:false,status:503,error:'旧版登录配置不完整，请恢复原有三个 Secret 后再访问'};
-  const blocked=this.blocked(ip);if(blocked)return blocked;
-  if(!this.env.SETUP_TOKEN||this.env.SETUP_TOKEN.length<24)return {ok:false,status:503,error:'请先在 Cloudflare 设置至少 24 字符的 SETUP_TOKEN'};
-  const valid=await passwordMatches(token,hex(await hash(this.env.SETUP_TOKEN)));
-  const later=this.blocked(ip);if(later)return later;
-  if(!valid)return this.failure(ip);
-  const PASSWORD_SALT=bytesToBase64(crypto.getRandomValues(new Uint8Array(16)));
-  const ACCESS_PASSWORD_HASH=hex(await passwordVerifier(password,PASSWORD_SALT));
-  const credentials={ACCESS_PASSWORD_HASH,PASSWORD_SALT,SESSION_SECRET:bytesToBase64(crypto.getRandomValues(new Uint8Array(32))),DATA_KEY:bytesToBase64(crypto.getRandomValues(new Uint8Array(32)))};
-  // All writes are synchronous after the async derivation, so only one setup wins.
-  if(this.credentials())return {ok:false,status:409,error:'工作区已完成初始化，不能重复设置'};
-  this.ctx.storage.sql.exec('INSERT INTO access_config(id,value) VALUES(1,?)',JSON.stringify(credentials));
   this.clearIp(ip);return {ok:true};
  }
  list(currentIp){

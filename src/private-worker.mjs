@@ -1,7 +1,7 @@
 import assets from './assets.generated.mjs';
 import {validateState} from './model.js';
 import {createSession,verifySession,sealWorkspace,unsealWorkspace} from './server-crypto.mjs';
-import {CURRENT_KEY,readWorkspace,saveWorkspace,listHistory,readHistory,restoreHistory,pruneHistory} from './workspace-store.mjs';
+import {readWorkspace,saveWorkspace,listHistory,readHistory,restoreHistory,pruneHistory} from './workspace-store.mjs';
 import {normalizeIp} from './ip.js';
 export {AuthGuard} from './auth-guard.mjs';
 export {AccessControl} from './access-control.mjs';
@@ -35,23 +35,10 @@ async function login(request,env){
 const clientIp=request=>normalizeIp(request.headers.get('CF-Connecting-IP'))||'unknown';
 function failedLogin(result){
  if(result.status)return json({error:result.error},result.status);
- if(result.unconfigured)return json({error:'请先完成首次设置'},409);
+ if(result.unconfigured)return json({error:'访问密码尚未配置'},409);
  if(result.permanent)return json({error:'此 IP 已永久封禁，请从白名单 IP 登录后在设置中解除。',permanent:true},429);
  if(result.banned)return json({error:`登录失败次数过多，请在 ${Math.ceil(result.retryAfter/60)} 分钟后重试。`,retryAfter:result.retryAfter},429,{'Retry-After':String(result.retryAfter)});
- return json({error:result.whitelisted?'密码或初始化码不正确':`密码或初始化码不正确，还可尝试 ${result.remaining} 次。`},401);
-}
-async function setup(request,env){
- if(request.method!=='POST')return json({error:'方法不支持'},405);
- const body=await readJson(request,4096);
- if(!sameOrigin(request))return json({error:'请求来源不允许'},403);
- if(typeof body.password!=='string'||body.password.length<12||body.password.length>512||body.password!==body.confirm)return json({error:'请设置 12–512 字符密码，并确保两次输入一致'},400);
- if(typeof body.token!=='string'||body.token.length>512)return json({error:'初始化码格式不正确'},400);
- const control=env.ACCESS_CONTROL.getByName('workspace-access');
- if(!await control.getCredentials()&&await env.VAULTS.head(CURRENT_KEY))return json({error:'检测到已有工作区，但登录配置缺失。请恢复原有凭据，不要重新初始化。'},503);
- const result=await control.setup(body.token,body.password,clientIp(request));
- if(!result.ok)return failedLogin(result);
- const credentials=await control.getCredentials(),session=await createSession(credentials);
- return json({ok:true},200,{'Set-Cookie':setCookie(session.token)});
+ return json({error:result.whitelisted?'密码不正确':`密码不正确，还可尝试 ${result.remaining} 次。`},401);
 }
 async function workspace(request,env,ctx){
  if(request.method==='GET'){const {state,etag}=await readWorkspace(env);return json(state,200,{'ETag':etag});}
@@ -64,15 +51,8 @@ async function workspace(request,env,ctx){
 export default {async fetch(request,env,ctx){
  try{
   const url=new URL(request.url),path=url.pathname;
-  if(path==='/auth/setup')return await setup(request,env);
   const credentials=await env.ACCESS_CONTROL.getByName('workspace-access').getCredentials();
-  if(!credentials){
-   if(['GET','HEAD'].includes(request.method)){
-    if(['/', '/index.html'].includes(path))return assetResponse('/setup.html',request);
-    if(['/setup.js','/login.css'].includes(path))return assetResponse(path,request);
-   }
-   return json({error:'请先完成首次设置'},401);
-  }
+  if(!credentials)return json({error:'请在 Cloudflare 部署界面设置 ACCESS_PASSWORD（12–512 字符）'},503);
   env={...env,...credentials};
   if(path==='/auth/login')return await login(request,env);
   if(['GET','HEAD'].includes(request.method)&&(path==='/login.js'||path==='/login.css'))return assetResponse(path,request);

@@ -2,9 +2,9 @@
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/0511150/prompt-manager)
 
-点击按钮，将应用部署到你自己的 Cloudflare 账号；需要先开通 R2。部署页面填写至少 24 字符、独一无二的随机 `SETUP_TOKEN` 初始化码。部署完成后打开网站，凭初始化码设置访问密码（至少 12 字符）。初始化码不等于访问密码，切勿使用公开的示例值。
+点击按钮，将应用部署到你自己的 Cloudflare 账号；需要先开通 R2。在部署页面的 Secret 字段 `ACCESS_PASSWORD` 中直接设置网站访问密码（12–512 字符）。部署完成后打开网站，用刚设置的密码登录。无需初始化码，也无需在网站上再次设置密码。
 
-一键部署读取 `wrangler.jsonc`，默认部署命令为 `npm run deploy`；资源由 Cloudflare 创建和绑定。网站密码只保存 PBKDF2-SHA-256 加盐校验结果，会话密钥和数据加密密钥自动生成并持久化到 `AccessControl`。首次设置只能成功一次，并发提交也不能覆盖已设置的密码。
+一键部署读取 `wrangler.jsonc`，默认部署命令为 `npm run deploy`；资源由 Cloudflare 创建和绑定。`ACCESS_PASSWORD` 作为 Cloudflare Secret 保存；应用自动生成 PBKDF2-SHA-256 加盐校验结果、会话密钥和数据加密密钥，并持久化到 `AccessControl`。网站不提供公开的密码设置或重置接口。
 
 基于 Cloudflare Workers、R2 和 Durable Objects 的单用户 Prompt 管理器。
 
@@ -46,7 +46,7 @@ npm audit --omit=dev
 
 ## 部署到 Cloudflare
 
-一键部署和新部署使用 `wrangler.jsonc`（不含个人账号或域名）。按钮中的部署流程会要求 `SETUP_TOKEN`；也可以先通过 `npx wrangler secret put SETUP_TOKEN` 设置初始化码后部署。
+一键部署和新部署使用 `wrangler.jsonc`（不含个人账号或域名）。部署界面会要求 Secret `ACCESS_PASSWORD`，此处填写的就是之后的网站登录密码。手动部署可使用 `npx wrangler secret put ACCESS_PASSWORD` 输入密码后，再执行 `npm run deploy`。
 
 现有基于 cf 的部署仍使用 `cloudflare.config.ts`，其更新命令为 `npm run deploy:cf`。继续更新旧部署前先登录：
 
@@ -102,7 +102,7 @@ R2 桶与 Durable Object 由 CLI 按配置创建或绑定；账号需要开通 R
 
 在「设置 → 登录保护 · Fail2ban」可查看失败次数、最近 24 小时触发次数、临时/永久封禁状态，手动解除并清空记录，以及添加/移除白名单。白名单支持单个 IPv4 和 IPv6 地址，不支持通配符或网段；白名单仍须正确密码。添加白名单时会清空该 IP 的已有统计。
 
-新部署的密码校验、会话密钥、数据密钥与封禁/白名单均保存在 SQLite Durable Object 中，不占用 R2 历史。不要删除 `AccessControl` 数据或绑定，避免丢失访问凭据与解密密钥。旧部署继续使用原有的三个 Worker Secrets，升级不会重新初始化或更换密钥。
+新部署的访问密码作为 Cloudflare Secret 保存；密码校验、会话密钥、数据密钥与封禁/白名单保存在 SQLite Durable Object 中，不占用 R2 历史。不要删除 `AccessControl` 数据或绑定，避免丢失访问凭据与解密密钥。旧部署继续使用已有凭据，升级不会重置密码或更换密钥。在 Cloudflare 更新 `ACCESS_PASSWORD` 后重新部署，应用会更新密码校验并使旧登录失效，同时保留原有数据密钥、R2 内容和可解密的备份。
 
 详见 [安全说明](SECURITY.md)。服务器可解密工作区数据，本项目不提供端到端加密。
 
@@ -121,7 +121,7 @@ R2 桶与 Durable Object 由 CLI 按配置创建或绑定；账号需要开通 R
 - `src/app.js`：前端交互、预览与同步。
 - `src/model.js`：数据模型、验证和模板变量。
 - `src/private-worker.mjs`：门禁、工作区、备份和历史 API。
-- `src/access-control.mjs`：首次设置、持久化凭据、IP 封禁与白名单。
+- `src/access-control.mjs`：部署密码、持久化凭据、IP 封禁与白名单。
 - `src/auth-guard.mjs`、`src/ban-policy.mjs`：会话撤销与封禁规则。
 - `src/workspace-store.mjs`：当前状态、100 条历史与并发条件写入。
 - `src/server-crypto.mjs`：会话签名和 AES-GCM 加密。

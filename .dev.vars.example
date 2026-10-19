@@ -1,3 +1,3 @@
-# Set a unique random initialization code of at least 24 characters.
-# This is NOT the website password. Use it once to set that password after deployment.
-SETUP_TOKEN=
+# Set the website login password directly in the Cloudflare deployment form.
+# Use a unique password of 12–512 characters. Never commit the real value.
+ACCESS_PASSWORD=
