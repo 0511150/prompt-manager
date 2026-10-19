@@ -1,20 +1,22 @@
 import {DurableObject} from 'cloudflare:workers';
 import {readWorkspace,saveWorkspace,restoreHistory,readHistory,pruneHistory} from './workspace-store.mjs';
 import {validateState} from './model.js';
-import {LEASE_TTL_MS,validEditId,contentVersion,sameItem,diffWorkspace,putItem,validateChanges} from './edit-protocol.js';
+import {DEFAULT_IDLE_SECONDS,MAX_IDLE_SECONDS,validIdleSeconds,LEASE_TTL_MS,validEditId,contentVersion,sameItem,diffWorkspace,putItem,validateChanges} from './edit-protocol.js';
 
 const fail=(status,message,details={})=>Object.assign(Error(message),{status,details});
 // One coordinator per workspace. Leases are independent rows per document;
 // only the short R2 snapshot commits are serialized, never the editing sessions.
 export class WorkspaceEditor extends DurableObject{
- constructor(ctx,env){super(ctx,env);this.queue=Promise.resolve();ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS edit_lease (document TEXT PRIMARY KEY, client TEXT NOT NULL, session TEXT NOT NULL, token TEXT NOT NULL, expires INTEGER NOT NULL)');}
+ constructor(ctx,env){super(ctx,env);this.queue=Promise.resolve();ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS edit_lease (document TEXT PRIMARY KEY, client TEXT NOT NULL, session TEXT NOT NULL, token TEXT NOT NULL, expires INTEGER NOT NULL)');ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS editor_settings (id INTEGER PRIMARY KEY, idle_seconds INTEGER NOT NULL)');}
+ settings(){const row=this.ctx.storage.sql.exec('SELECT idle_seconds FROM editor_settings WHERE id=1').toArray()[0];return {idleSeconds:row?.idle_seconds??DEFAULT_IDLE_SECONDS};}
+ updateSettings(input){return this.run(()=>{if(!validIdleSeconds(input?.idleSeconds))throw fail(400,`锁定时间请输入 1–${MAX_IDLE_SECONDS} 之间的整数，单位为秒`);this.ctx.storage.sql.exec('INSERT OR REPLACE INTO editor_settings(id,idle_seconds) VALUES(1,?)',input.idleSeconds);return this.settings();});}
  run(task){const result=this.queue.then(async()=>{try{return await task();}catch(error){return {status:error.status||500,error:error.status?error.message:'保存暂时不可用，请稍后重试',...error.details};}});this.queue=result.then(()=>{});return result;}
  async workspaceEnv(){const credentials=await this.env.ACCESS_CONTROL.getByName('workspace-access').getCredentials();if(!credentials)throw fail(503,'访问密码尚未配置');return {...this.env,...credentials};}
  lease(id){return this.ctx.storage.sql.exec('SELECT * FROM edit_lease WHERE document=?',id).toArray()[0];}
  owns(row,owner,token){return row&&row.client===owner.client&&row.session===owner.session&&row.token===token&&row.expires>Date.now();}
  releaseOwned(id,owner,token){const row=this.lease(id);if(row&&row.client===owner.client&&row.session===owner.session&&row.token===token)this.ctx.storage.sql.exec('DELETE FROM edit_lease WHERE document=?',id);}
  async scope(env){return contentVersion({id:'workspace',key:env.DATA_KEY});}
- snapshot(owner){return this.run(async()=>{const env=await this.workspaceEnv(),snapshot=await readWorkspace(env);this.ctx.storage.sql.exec('DELETE FROM edit_lease WHERE expires<=?',Date.now());const locks=this.ctx.storage.sql.exec('SELECT document,client,session,expires FROM edit_lease').toArray().map(row=>({id:row.document,until:row.expires,owned:row.client===owner.client&&row.session===owner.session}));return {state:snapshot.state,etag:snapshot.etag,workspaceId:await this.scope(env),locks};});}
+ snapshot(owner){return this.run(async()=>{const env=await this.workspaceEnv(),snapshot=await readWorkspace(env);this.ctx.storage.sql.exec('DELETE FROM edit_lease WHERE expires<=?',Date.now());const locks=this.ctx.storage.sql.exec('SELECT document,client,session,expires FROM edit_lease').toArray().map(row=>({id:row.document,until:row.expires,owned:row.client===owner.client&&row.session===owner.session}));return {state:snapshot.state,etag:snapshot.etag,workspaceId:await this.scope(env),locks,settings:this.settings()};});}
  edit(action,id,owner,token,baseVersion){return this.run(async()=>{
   if(!validEditId(id))throw fail(400,'文件标识无效');
   const row=this.lease(id),now=Date.now();

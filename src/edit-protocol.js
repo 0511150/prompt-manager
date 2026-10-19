@@ -1,6 +1,8 @@
 // Shared comparison rules: navigation and timestamps are not document edits.
 export const EDIT_GROUPS=['prompts','folders','bookmarks','bookmarkFolders','presets'];
-export const EDIT_IDLE_MS=120_000,LEASE_TTL_MS=150_000,HEARTBEAT_MS=30_000;
+export const DEFAULT_IDLE_SECONDS=10,MAX_IDLE_SECONDS=86_400;
+export const validIdleSeconds=value=>Number.isInteger(value)&&value>=1&&value<=MAX_IDLE_SECONDS;
+export const EDIT_IDLE_MS=DEFAULT_IDLE_SECONDS*1000,LEASE_TTL_MS=150_000,HEARTBEAT_MS=30_000;
 export const validEditId=value=>typeof value==='string'&&/^[a-zA-Z0-9_-]{1,100}$/.test(value);
 function stable(value){if(Array.isArray(value))return value.map(stable);if(value&&typeof value==='object')return Object.fromEntries(Object.keys(value).sort().map(key=>[key,stable(value[key])]));return value;}
 export function comparable(group,item){if(!item)return null;const copy={...item};if(group==='prompts'||group==='presets')delete copy.updated;if(group==='folders')delete copy.open;return stable(copy);}

@@ -17,7 +17,15 @@ test('per-file leases, independent concurrent saves, fencing, restart, history a
  try{
   const cookie=await login(),otherCookie=await login(),a=crypto.randomUUID(),b=crypto.randomUUID();
   const read=async client=>{const r=await req('/api/edit/state?client='+client,{cookie});assert.equal(r.status,200);return r.json();};
-  const first=await read(a);assert.equal(first.state.version,1);assert.match(first.workspaceId,/^[a-f0-9]{64}$/);
+  const first=await read(a);assert.equal(first.state.version,1);assert.match(first.workspaceId,/^[a-f0-9]{64}$/);assert.equal(first.settings.idleSeconds,10);
+  const objectsBeforeSettings=await (await mf.getR2Bucket('VAULTS')).list();
+  assert.equal((await req('/api/edit/settings')).status,401);
+  assert.equal((await req('/api/edit/settings',{method:'POST',body:{idleSeconds:25}})).status,401);
+  assert.equal((await req('/api/edit/settings',{method:'POST',cookie,body:{idleSeconds:25},extra:{Origin:'https://other.invalid'}})).status,403);
+  for(const idleSeconds of [0,-1,1.5,86401,'25',null])assert.equal((await req('/api/edit/settings',{method:'POST',cookie,body:{idleSeconds}})).status,400);
+  const savedSettings=await req('/api/edit/settings',{method:'POST',cookie,body:{idleSeconds:25}});assert.equal(savedSettings.status,200);assert.equal((await savedSettings.json()).idleSeconds,25);
+  assert.equal((await (await req('/api/edit/settings',{cookie})).json()).idleSeconds,25);assert.equal((await read(b)).settings.idleSeconds,25);
+  assert.deepEqual(await (await mf.getR2Bucket('VAULTS')).list(),objectsBeforeSettings,'changing lock timing creates no R2 objects or history');
   const lease=async(client,id,base=first.state.prompts.find(p=>p.id===id),token,c= cookie)=>req('/api/edit/lease',{method:'POST',cookie:c,body:{action:'acquire',client,document:id,baseVersion:await contentVersion(base),token}});
   assert.equal((await req('/api/edit/state?client='+a)).status,401);
   assert.equal((await req('/api/edit/lease',{method:'POST',cookie,body:{action:'acquire',client:'bad',document:'email'}})).status,400);
@@ -41,7 +49,7 @@ test('per-file leases, independent concurrent saves, fencing, restart, history a
   if(restoredFile!=='email')assert.equal((await lease(b,restoredFile,latest.state.prompts.find(p=>p.id===restoredFile))).status,200);
   assert.equal((await req('/api/history/'+history.items.at(-1).id+'/restore',{method:'POST',cookie,extra:{'X-Workspace-Revision':latest.etag}})).status,423,'restore cannot replace a leased file');
   const stub=(await mf.getDurableObjectNamespace('WORKSPACE_EDITOR')).getByName('private-workspace'),row=await stub.lease('email');assert.equal(row.token,newToken);
-  await mf.dispose();mf=create();const restarted=(await mf.getDurableObjectNamespace('WORKSPACE_EDITOR')).getByName('private-workspace');assert.equal((await restarted.lease('email')).token,newToken,'lease is persisted in SQLite across restart');
+  await mf.dispose();mf=create();const restarted=(await mf.getDurableObjectNamespace('WORKSPACE_EDITOR')).getByName('private-workspace');assert.equal((await restarted.lease('email')).token,newToken,'lease is persisted in SQLite across restart');assert.equal((await (await req('/api/edit/settings',{cookie})).json()).idleSeconds,25,'lock timing persists across restart');
   assert.equal((await lease(b,'email',latest.state.prompts.find(p=>p.id==='email'))).status,423);
   await req('/__test_clock?advance='+(LEASE_TTL_MS+1000));
   const expiredGrant=await lease(b,'email',latest.state.prompts.find(p=>p.id==='email'));assert.equal(expiredGrant.status,200);const takeover=(await expiredGrant.json()).token;

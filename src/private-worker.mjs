@@ -62,6 +62,12 @@ export default {async fetch(request,env,ctx){
   if(!['GET','HEAD'].includes(request.method)&&!sameOrigin(request))return json({error:'请求来源不允许'},403);
   if(path==='/auth/logout'&&request.method==='POST'){await readBody(request,2048);await env.AUTH_GUARD.getByName('session:'+session.id).revoke();return json({ok:true},200,{'Set-Cookie':clearCookie});}
   if(path==='/api/workspace')return await workspace(request,env,ctx);
+  if(path==='/api/edit/settings'){
+   const editor=env.WORKSPACE_EDITOR.getByName('private-workspace');
+   if(request.method==='GET')return json(await editor.settings());
+   if(request.method!=='POST')return json({error:'方法不支持'},405);
+   const result=await editor.updateSettings(await readJson(request,2048));return json(result,result.status||200);
+  }
   if(path==='/api/edit/state'&&request.method==='GET'){
    const client=url.searchParams.get('client');if(!/^[a-f0-9-]{36}$/.test(client||''))return json({error:'页面标识无效'},400);
    const result=await env.WORKSPACE_EDITOR.getByName('private-workspace').snapshot({client,session:session.id});return json(result,result.status||200);
