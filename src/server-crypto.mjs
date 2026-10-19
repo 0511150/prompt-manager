@@ -1,0 +1,14 @@
+const enc=new TextEncoder();
+export const bytesToBase64=bytes=>{let s='';for(const x of new Uint8Array(bytes))s+=String.fromCharCode(x);return btoa(s);};
+export const base64ToBytes=text=>Uint8Array.from(atob(text),c=>c.charCodeAt(0));
+export const hash=async value=>new Uint8Array(await crypto.subtle.digest('SHA-256',enc.encode(value)));
+export const hex=bytes=>Array.from(bytes,x=>x.toString(16).padStart(2,'0')).join('');
+export async function passwordMatches(password,expected){const computed=await hash(password),stored=Uint8Array.from((expected||'').match(/.{2}/g)||[],x=>parseInt(x,16));return stored.length===32&&crypto.subtle.timingSafeEqual(computed,stored);}
+const dataKey=secret=>crypto.subtle.importKey('raw',base64ToBytes(secret),'AES-GCM',false,['encrypt','decrypt']);
+export async function sealWorkspace(state,secret){const iv=crypto.getRandomValues(new Uint8Array(12));const encrypted=await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:enc.encode('prompt-manager/single-workspace/v2')},await dataKey(secret),enc.encode(JSON.stringify(state)));return {v:2,iv:bytesToBase64(iv),ciphertext:bytesToBase64(encrypted)};}
+export async function unsealWorkspace(payload,secret){if(payload?.v!==2||typeof payload.iv!=='string'||typeof payload.ciphertext!=='string')throw Error('Unsupported backup');return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({name:'AES-GCM',iv:base64ToBytes(payload.iv),additionalData:enc.encode('prompt-manager/single-workspace/v2')},await dataKey(secret),base64ToBytes(payload.ciphertext))));}
+const url64=bytes=>bytesToBase64(bytes).replaceAll('+','-').replaceAll('/','_').replace(/=+$/,'');
+const unurl64=text=>base64ToBytes(text.replaceAll('-','+').replaceAll('_','/'));
+const signingKey=env=>crypto.subtle.importKey('raw',enc.encode(env.SESSION_SECRET+':'+env.ACCESS_PASSWORD_HASH),{name:'HMAC',hash:'SHA-256'},false,['sign','verify']);
+export async function createSession(env,now=Date.now()){const payload={v:1,id:crypto.randomUUID(),exp:now+12*60*60*1000};const part=url64(enc.encode(JSON.stringify(payload)));const signature=await crypto.subtle.sign('HMAC',await signingKey(env),enc.encode(part));return {token:part+'.'+url64(signature),payload};}
+export async function verifySession(token,env,now=Date.now()){try{if(!token||token.length>600)return null;const parts=token.split('.');if(parts.length!==2)return null;const [part,signature]=parts;const valid=await crypto.subtle.verify('HMAC',await signingKey(env),unurl64(signature),enc.encode(part));if(!valid)return null;const payload=JSON.parse(new TextDecoder().decode(unurl64(part)));return payload.v===1&&typeof payload.id==='string'&&/^[a-z0-9-]{36}$/.test(payload.id)&&Number.isFinite(payload.exp)&&payload.exp>now&&payload.exp<=now+12*60*60*1000?payload:null;}catch{return null;}}

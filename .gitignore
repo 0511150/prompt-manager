@@ -1,0 +1,12 @@
+node_modules/
+.cloudflare/
+.wrangler/
+dist/
+src/assets.generated.mjs
+.env*
+.dev.vars*
+*.log
+coverage/
+*.zip
+*.pem
+*.key

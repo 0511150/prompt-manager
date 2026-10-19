@@ -1,0 +1,32 @@
+{
+  "name": "prompt-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test --test-concurrency=1 tests/*.test.mjs",
+    "deploy": "cf deploy",
+    "dev": "node build.mjs && vite --host 127.0.0.1 --port 8787",
+    "setup:dev": "node scripts/setup-dev.mjs",
+    "predeploy": "npm run build"
+  },
+  "dependencies": {
+    "dompurify": "^3.3.0",
+    "katex": "^0.19.0",
+    "marked": "^16.4.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^2.0.0-beta.v.1",
+    "cf": "1.0.0-beta.18",
+    "esbuild": "^0.28.2",
+    "vite": "^8.3.4"
+  },
+  "allowScripts": {
+    "esbuild": true,
+    "workerd": true
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  }
+}
