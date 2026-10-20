@@ -1,3 +1,5 @@
+import {readImage,imageKey,encryptImage} from './image-store.mjs';
+import {IMAGE_LIMIT,imageInfo,imageHash} from './images.js';
 import assets from './assets.generated.mjs';
 import {validateState} from './model.js';
 import {createSession,verifySession,sealWorkspace,unsealWorkspace} from './server-crypto.mjs';
@@ -6,7 +8,7 @@ import {normalizeIp} from './ip.js';
 export {AuthGuard} from './auth-guard.mjs';
 export {AccessControl} from './access-control.mjs';
 export {WorkspaceEditor} from './workspace-editor.mjs';
-const security={'X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY','Strict-Transport-Security':'max-age=31536000','Permissions-Policy':'camera=(), microphone=(), geolocation=()','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"};
+const security={'X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','X-Frame-Options':'DENY','Strict-Transport-Security':'max-age=31536000','Permissions-Policy':'camera=(), microphone=(), geolocation=()','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' blob: data: https:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"};
 const json=(value,status=200,headers={})=>Response.json(value,{status,headers:{...security,'Cache-Control':'no-store',...headers}});
 const cookieName='__Host-prompt_session';
 const setCookie=token=>`${cookieName}=${token}; Path=/; Max-Age=43200; HttpOnly; Secure; SameSite=Strict`;
@@ -61,6 +63,16 @@ export default {async fetch(request,env,ctx){
   if(!session){if(['GET','HEAD'].includes(request.method)&&['/','/index.html'].includes(path))return assetResponse('/login.html',request);return json({error:'请先输入访问密码'},401);}
   if(!['GET','HEAD'].includes(request.method)&&!sameOrigin(request))return json({error:'请求来源不允许'},403);
   if(path==='/auth/logout'&&request.method==='POST'){await readBody(request,2048);await env.AUTH_GUARD.getByName('session:'+session.id).revoke();return json({ok:true},200,{'Set-Cookie':clearCookie});}
+  if(path.startsWith('/api/'))env.HISTORY_LIMIT=(await env.WORKSPACE_EDITOR.getByName('private-workspace').settings()).historyLimit;
+  if(path==='/api/images/trash'&&request.method==='GET'){const result=await env.WORKSPACE_EDITOR.getByName('private-workspace').imageTrash();return json(result,result.status||200);}
+  const imageRoute=path.match(/^\/api\/images\/([a-f0-9]{64})(\/encrypted)?$/);
+  if(imageRoute){const id=imageRoute[1],encrypted=!!imageRoute[2];
+   if(request.method==='HEAD'){const object=await env.VAULTS.head(imageKey(id));return new Response(null,{status:object?200:404,headers:{...security,'Cache-Control':'no-store'}});}
+   if(request.method==='GET'){const result=await readImage(env,id,encrypted);return new Response(result.bytes,{headers:{...security,'Content-Type':result.type,'Cache-Control':'no-store','Content-Disposition':'inline','Vary':'Cookie'}});}
+   if(request.method==='POST'&&encrypted){const bytes=await readBody(request,IMAGE_LIMIT);try{imageInfo(bytes);}catch(e){return json({error:e.message},400);}if(await imageHash(bytes)!==id)return json({error:'图片哈希不匹配'},400);return new Response(await encryptImage(bytes,id,env.DATA_KEY),{headers:{...security,'Content-Type':'application/octet-stream','Cache-Control':'no-store','Vary':'Cookie'}});}
+   if(request.method==='PUT'){const bytes=await readBody(request,IMAGE_LIMIT+32);let name;try{name=decodeURIComponent(request.headers.get('X-Image-Name')||'图片');}catch{return json({error:'图片名称无效'},400);}const result=await env.WORKSPACE_EDITOR.getByName('private-workspace').uploadImage(id,bytes,name,encrypted);return json(result,result.status||200);}
+   return json({error:'方法不支持'},405);
+  }
   if(path==='/api/workspace')return await workspace(request,env,ctx);
   if(path==='/api/edit/settings'){
    const editor=env.WORKSPACE_EDITOR.getByName('private-workspace');
@@ -103,4 +115,4 @@ export default {async fetch(request,env,ctx){
   if(path==='/login.html')return Response.redirect(url.origin+'/',303);
   return assetResponse(path==='/'?'/index.html':path,request);
  }catch(error){if(error.status)return json({error:error.message},error.status);console.error(JSON.stringify({event:'request_error',message:error?.name||'Error'}));return json({error:'操作未完成，请稍后重试'},500);}
-},async scheduled(_event,env,ctx){ctx.waitUntil((async()=>{const control=env.ACCESS_CONTROL.getByName('workspace-access');await control.cleanup();const credentials=await control.getCredentials();if(credentials)await pruneHistory({...env,...credentials});})());}};
+},async scheduled(_event,env,ctx){ctx.waitUntil((async()=>{const control=env.ACCESS_CONTROL.getByName('workspace-access');await control.cleanup();const credentials=await control.getCredentials();if(credentials){const result=await env.WORKSPACE_EDITOR.getByName('private-workspace').cleanupImages();if(result.error)throw Error('Image cleanup deferred');}})());}};

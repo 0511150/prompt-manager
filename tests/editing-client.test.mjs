@@ -53,3 +53,10 @@ test('workspace timing loads on boot and refresh and releases an unchanged file 
 test('a delayed snapshot cannot roll back a newly saved lock timeout',async()=>{
  const f=fixture(),c=f.client;await c.boot();f.hold();const reading=c.refresh();await c.updateSettings(120);f.releaseRead();await reading;assert.equal(c.idleSeconds,120);assert(!c.dirty);c.dispose();
 });
+
+test('an attachment upload failure keeps the document draft and lease until a successful retry',async()=>{
+ const f=fixture(),c=f.client;await c.boot();await c.startEdit('email');f.state.prompts.find(p=>p.id==='email').body='image draft';c.changed();let ready=false,attempts=0;
+ c.beforeSave=async changes=>{attempts++;assert(changes.some(change=>change.group==='prompts'&&change.id==='email'));if(!ready)throw Object.assign(Error('image upload pending'),{status:400});};
+ await c.flush();assert.equal(f.commits,0);assert(c.dirty);assert(c.owned('email'));assert.equal(f.drafts.rows.get(c.client).changes[0].after.body,'image draft');
+ ready=true;await c.flush();assert.equal(attempts,2);assert.equal(f.commits,1);assert.equal(f.cloud.prompts.find(p=>p.id==='email').body,'image draft');assert(!c.dirty);assert(!c.owned('email'));c.dispose();
+});

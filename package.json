@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "dompurify": "^3.3.0",
+    "fflate": "^0.8.3",
     "katex": "^0.19.0",
     "marked": "^16.4.0"
   },
@@ -34,7 +35,7 @@
   "cloudflare": {
     "bindings": {
       "VAULTS": {
-        "description": "存放加密的当前工作区与最近 100 个旧状态。"
+        "description": "存放加密的当前工作区、可调条数的历史记录与按哈希去重的图片附件。"
       },
       "ACCESS_CONTROL": {
         "description": "保存密码校验、会话与数据密钥、IP 封禁和白名单。请勿删除此 Durable Object。"

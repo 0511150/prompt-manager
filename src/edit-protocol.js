@@ -12,3 +12,6 @@ export function diffWorkspace(before,after){const changes=[];for(const group of 
 export function putItem(state,group,id,item){state[group]??=[];const at=state[group].findIndex(x=>x.id===id);if(item===null){if(at!==-1)state[group].splice(at,1);}else if(at===-1)state[group].push(structuredClone(item));else state[group][at]=structuredClone(item);}
 export function overlayChanges(state,changes){const result=structuredClone(state);for(const change of changes)putItem(result,change.group,change.id,change.after);return result;}
 export function validateChanges(changes){if(!Array.isArray(changes)||changes.length>8000)throw Object.assign(Error('修改请求无效'),{status:400});const seen=new Set();for(const change of changes){const key=change?.group+':'+change?.id;if(!EDIT_GROUPS.includes(change?.group)||!validEditId(change.id)||seen.has(key)||![change.before,change.after].every(item=>item===null||item&&typeof item==='object'&&!Array.isArray(item)&&item.id===change.id))throw Object.assign(Error('修改请求无效'),{status:400});seen.add(key);}return changes;}
+
+export const DEFAULT_HISTORY_LIMIT=20,MAX_HISTORY_LIMIT=1000;
+export const validHistoryLimit=value=>Number.isInteger(value)&&value>=1&&value<=MAX_HISTORY_LIMIT;

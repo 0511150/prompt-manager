@@ -18,7 +18,7 @@ const env=()=>({VAULTS:new Bucket(),DATA_KEY:btoa('d'.repeat(32))});
 async function save(e,s,tag,reason){const result=await saveWorkspace(e,s,tag,reason);await pruneHistory(e,result.droppedKeys);return result;}
 
 test('retains exactly 100 previous states and restores without losing the pre-restore state',async()=>{
- const e=env(),s=freshState();s.prompts[0].title='Edit 0';let tag=(await save(e,s,'"new"')).etag;
+ const e={...env(),HISTORY_LIMIT:100},s=freshState();s.prompts[0].title='Edit 0';let tag=(await save(e,s,'"new"')).etag;
  for(let i=1;i<=105;i++){s.prompts[0].title='Edit '+i;tag=(await save(e,s,tag)).etag;}
  const h=await listHistory(e);assert.equal(h.limit,100);assert.equal(h.items.length,100);
  assert.equal((await readHistory(e,h.items[0].id)).state.prompts[0].title,'Edit 104');

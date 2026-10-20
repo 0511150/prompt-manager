@@ -1,5 +1,7 @@
+import {storeImage,assertImages,reconcileImages} from './image-store.mjs';
+import {DEFAULT_HISTORY_LIMIT,MAX_HISTORY_LIMIT,validHistoryLimit} from './edit-protocol.js';
 import {DurableObject} from 'cloudflare:workers';
-import {readWorkspace,saveWorkspace,restoreHistory,readHistory,pruneHistory} from './workspace-store.mjs';
+import {readWorkspace,saveWorkspace,restoreHistory,readHistory,pruneHistory,trimHistory} from './workspace-store.mjs';
 import {validateState} from './model.js';
 import {DEFAULT_IDLE_SECONDS,MAX_IDLE_SECONDS,validIdleSeconds,LEASE_TTL_MS,validEditId,contentVersion,sameItem,diffWorkspace,putItem,validateChanges} from './edit-protocol.js';
 
@@ -7,11 +9,21 @@ const fail=(status,message,details={})=>Object.assign(Error(message),{status,det
 // One coordinator per workspace. Leases are independent rows per document;
 // only the short R2 snapshot commits are serialized, never the editing sessions.
 export class WorkspaceEditor extends DurableObject{
- constructor(ctx,env){super(ctx,env);this.queue=Promise.resolve();ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS edit_lease (document TEXT PRIMARY KEY, client TEXT NOT NULL, session TEXT NOT NULL, token TEXT NOT NULL, expires INTEGER NOT NULL)');ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS editor_settings (id INTEGER PRIMARY KEY, idle_seconds INTEGER NOT NULL)');}
- settings(){const row=this.ctx.storage.sql.exec('SELECT idle_seconds FROM editor_settings WHERE id=1').toArray()[0];return {idleSeconds:row?.idle_seconds??DEFAULT_IDLE_SECONDS};}
- updateSettings(input){return this.run(()=>{if(!validIdleSeconds(input?.idleSeconds))throw fail(400,`锁定时间请输入 1–${MAX_IDLE_SECONDS} 之间的整数，单位为秒`);this.ctx.storage.sql.exec('INSERT OR REPLACE INTO editor_settings(id,idle_seconds) VALUES(1,?)',input.idleSeconds);return this.settings();});}
+ constructor(ctx,env){super(ctx,env);this.queue=Promise.resolve();ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS edit_lease (document TEXT PRIMARY KEY, client TEXT NOT NULL, session TEXT NOT NULL, token TEXT NOT NULL, expires INTEGER NOT NULL)');ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS image_blob (id TEXT PRIMARY KEY, metadata TEXT NOT NULL, unref_since INTEGER, created INTEGER NOT NULL)');ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS history_settings (id INTEGER PRIMARY KEY, history_limit INTEGER NOT NULL)');ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS editor_settings (id INTEGER PRIMARY KEY, idle_seconds INTEGER NOT NULL)');}
+ settings(){const row=this.ctx.storage.sql.exec('SELECT idle_seconds FROM editor_settings WHERE id=1').toArray()[0];const history=this.ctx.storage.sql.exec('SELECT history_limit FROM history_settings WHERE id=1').toArray()[0];return {idleSeconds:row?.idle_seconds??DEFAULT_IDLE_SECONDS,historyLimit:history?.history_limit??DEFAULT_HISTORY_LIMIT};}
+ updateSettings(input){return this.run(async()=>{
+  if(!input||!Object.hasOwn(input,'idleSeconds')&&!Object.hasOwn(input,'historyLimit'))throw fail(400,'设置请求无效');
+  if(Object.hasOwn(input,'idleSeconds')&&!validIdleSeconds(input.idleSeconds))throw fail(400,`锁定时间请输入 1–${MAX_IDLE_SECONDS} 之间的整数，单位为秒`);
+  if(Object.hasOwn(input,'historyLimit')&&!validHistoryLimit(input.historyLimit))throw fail(400,`历史记录请输入 1–${MAX_HISTORY_LIMIT} 之间的整数`);
+  if(Object.hasOwn(input,'historyLimit')){const env=await this.workspaceEnv();await trimHistory({...env,HISTORY_LIMIT:input.historyLimit});this.ctx.storage.sql.exec('INSERT OR REPLACE INTO history_settings(id,history_limit) VALUES(1,?)',input.historyLimit);await reconcileImages({...env,HISTORY_LIMIT:input.historyLimit},this.ctx.storage.sql);}
+  if(Object.hasOwn(input,'idleSeconds'))this.ctx.storage.sql.exec('INSERT OR REPLACE INTO editor_settings(id,idle_seconds) VALUES(1,?)',input.idleSeconds);
+  return this.settings();
+ });}
+ uploadImage(id,bytes,name,encrypted=false){return this.run(async()=>storeImage(await this.workspaceEnv(),this.ctx.storage.sql,id,bytes,name,encrypted));}
+ imageTrash(){return this.run(async()=>reconcileImages(await this.workspaceEnv(),this.ctx.storage.sql));}
+ cleanupImages(){return this.run(async()=>{const env=await this.workspaceEnv();await trimHistory(env);await pruneHistory(env);return reconcileImages(env,this.ctx.storage.sql,true);});}
  run(task){const result=this.queue.then(async()=>{try{return await task();}catch(error){return {status:error.status||500,error:error.status?error.message:'保存暂时不可用，请稍后重试',...error.details};}});this.queue=result.then(()=>{});return result;}
- async workspaceEnv(){const credentials=await this.env.ACCESS_CONTROL.getByName('workspace-access').getCredentials();if(!credentials)throw fail(503,'访问密码尚未配置');return {...this.env,...credentials};}
+ async workspaceEnv(){const credentials=await this.env.ACCESS_CONTROL.getByName('workspace-access').getCredentials();if(!credentials)throw fail(503,'访问密码尚未配置');return {...this.env,...credentials,HISTORY_LIMIT:this.settings().historyLimit};}
  lease(id){return this.ctx.storage.sql.exec('SELECT * FROM edit_lease WHERE document=?',id).toArray()[0];}
  owns(row,owner,token){return row&&row.client===owner.client&&row.session===owner.session&&row.token===token&&row.expires>Date.now();}
  releaseOwned(id,owner,token){const row=this.lease(id);if(row&&row.client===owner.client&&row.session===owner.session&&row.token===token)this.ctx.storage.sql.exec('DELETE FROM edit_lease WHERE document=?',id);}
@@ -42,9 +54,11 @@ export class WorkspaceEditor extends DurableObject{
    }
    next.tabs=next.tabs.filter(id=>next.prompts.some(p=>p.id===id));if(!next.tabs.includes(next.active))next.active=next.tabs[0]||null;
    try{validateState(next);}catch{throw fail(400,'修改后的工作区格式无效');}
+   await assertImages(env,next,this.ctx.storage.sql);
    let result;
    try{result=diffWorkspace(previous.state,next).length?await saveWorkspace(env,next,previous.etag,input.reason||'edit'):{...previous,historyCount:previous.record?.history.length||0,droppedKeys:[]};}
    catch(error){if(error.status===409&&attempt<2)continue;throw error;}
+   await reconcileImages(env,this.ctx.storage.sql);
    for(const change of changes)if(change.group==='prompts')this.releaseOwned(change.id,owner,proofs[change.id]);
    this.ctx.waitUntil(pruneHistory(env,result.droppedKeys).catch(()=>console.error(JSON.stringify({event:'history_cleanup_deferred'}))));
    return {ok:true,state:next,etag:result.etag,historyCount:result.historyCount};
@@ -55,7 +69,9 @@ export class WorkspaceEditor extends DurableObject{
   const env=await this.workspaceEnv(),previous=await readWorkspace(env);if(previous.etag!==revision)throw fail(409,'其他位置已更新工作区，请先读取最新内容');
   let next;try{next=historyId?(await readHistory(env,historyId)).state:validateState(input);}catch(error){throw fail(error.status||400,error.status?error.message:'工作区内容无效');}
   for(const change of diffWorkspace(previous.state,next).filter(x=>x.group==='prompts')){const row=this.lease(change.id);if(row?.expires>Date.now())throw fail(423,'有文件正在其他位置编辑，请等待保存并解锁后再导入或恢复',{document:change.id});}
+  await assertImages(env,next,this.ctx.storage.sql);
   const result=historyId?await restoreHistory(env,historyId,revision):await saveWorkspace(env,next,revision,reason);
+  await reconcileImages(env,this.ctx.storage.sql);
   this.ctx.waitUntil(pruneHistory(env,result.droppedKeys).catch(()=>console.error(JSON.stringify({event:'history_cleanup_deferred'}))));return {ok:true,state:result.state,etag:result.etag,historyCount:result.historyCount};
  });}
 }

@@ -1,3 +1,4 @@
+import {validateImages} from './images.js';
 import {normalizePromptOrders} from './prompt-order.js';
 import {normalizePresetScopes} from './preset-scopes.js';
 export const uid=()=>crypto.randomUUID();
@@ -20,6 +21,7 @@ export function validateState(s){
  for(const order of s.promptOrders)if(!order||!validId(order.id)||!(order.folder===null||validId(order.folder))||!Array.isArray(order.ids)||order.ids.length>2000||!order.ids.every(validId)||new Set(order.ids).size!==order.ids.length)throw Error('文件排序格式不正确');
  if(new Set(s.promptOrders.map(o=>o.id)).size!==s.promptOrders.length||new Set(s.promptOrders.map(o=>o.folder)).size!==s.promptOrders.length)throw Error('文件排序中有重复标识');
  for(const p of s.prompts)if(!str(p.id)||!str(p.title)||!str(p.body)||!values(p.values)||!(p.folder===null||str(p.folder)))throw Error('Prompt 内容格式不正确');
+ for(const prompt of s.prompts)validateImages(prompt);
  for(const f of s.folders)if(!str(f.id)||!str(f.name)||!(f.parent===null||str(f.parent)))throw Error('文件夹格式不正确');
  for(const f of s.bookmarkFolders)if(!str(f.id)||!str(f.name))throw Error('收藏文件夹格式不正确');
  for(const b of s.bookmarks)if(!str(b.id)||!str(b.prompt)||!(b.folder===null||str(b.folder)))throw Error('收藏格式不正确');

@@ -1,16 +1,18 @@
-import {DEFAULT_IDLE_SECONDS,validIdleSeconds,HEARTBEAT_MS,contentVersion,diffWorkspace,overlayChanges,putItem,sameItem,validateChanges} from './edit-protocol.js';
+import {DEFAULT_IDLE_SECONDS,validIdleSeconds,DEFAULT_HISTORY_LIMIT,validHistoryLimit,HEARTBEAT_MS,contentVersion,diffWorkspace,overlayChanges,putItem,sameItem,validateChanges} from './edit-protocol.js';
 import {LocalDrafts} from './local-drafts.js';
 
 export class EditingClient{
  settingsGeneration=0;
- constructor({request,getState,setState,onStatus=()=>{},onChange=()=>{},drafts=new LocalDrafts(),now=()=>Date.now(),online=()=>navigator.onLine,pause=()=>false,timers=globalThis}){
-  Object.assign(this,{request,getState,setState,onStatus,onChange,drafts,now,online,pause,timers});this.client=crypto.randomUUID();this.base=null;this.scope=null;this.etag=null;this.leases=new Map();this.remoteLocks=new Map();this.problems=new Map();this.activity=new Map();this.lastAfter=new Map();this.acquiring=new Map();this.recovered=new Set();this.offline=!online();this.authExpired=false;this.localError=false;this.draftRecords=[];this.persistQueue=Promise.resolve();this.retryAfter=0;this.reason='edit';this.remoteGeneration=0;
+ constructor({request,getState,setState,onStatus=()=>{},onChange=()=>{},drafts=new LocalDrafts(),now=()=>Date.now(),online=()=>navigator.onLine,pause=()=>false,beforeSave=async()=>{},timers=globalThis}){
+  Object.assign(this,{request,getState,setState,onStatus,onChange,drafts,now,online,pause,beforeSave,timers});this.client=crypto.randomUUID();this.base=null;this.scope=null;this.etag=null;this.leases=new Map();this.remoteLocks=new Map();this.problems=new Map();this.activity=new Map();this.lastAfter=new Map();this.acquiring=new Map();this.recovered=new Set();this.offline=!online();this.authExpired=false;this.localError=false;this.draftRecords=[];this.persistQueue=Promise.resolve();this.retryAfter=0;this.reason='edit';this.remoteGeneration=0;
  }
  get changes(){return this.base?diffWorkspace(this.base,this.getState()):[];}
+ get historyLimit(){return this.settings?.historyLimit??DEFAULT_HISTORY_LIMIT;}
  get idleSeconds(){return this.settings?.idleSeconds??DEFAULT_IDLE_SECONDS;}
  get idleMs(){return this.idleSeconds*1000;}
- setSettings(settings){const idleSeconds=validIdleSeconds(settings?.idleSeconds)?settings.idleSeconds:DEFAULT_IDLE_SECONDS;if(idleSeconds===this.idleSeconds)return;this.settings={idleSeconds};this.schedule();this.notify();}
+ setSettings(settings){const idleSeconds=validIdleSeconds(settings?.idleSeconds)?settings.idleSeconds:DEFAULT_IDLE_SECONDS;const historyLimit=validHistoryLimit(settings?.historyLimit)?settings.historyLimit:DEFAULT_HISTORY_LIMIT;if(idleSeconds===this.idleSeconds&&historyLimit===this.historyLimit)return;this.settings={idleSeconds,historyLimit};this.schedule();this.notify();}
  async readSettings(){const generation=this.settingsGeneration,settings=await (await this.request('/api/edit/settings')).json();if(generation===this.settingsGeneration)this.setSettings(settings);return settings;}
+ async updateHistoryLimit(historyLimit){this.settingsGeneration++;const settings=await (await this.request('/api/edit/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({historyLimit})})).json();this.settingsGeneration++;this.setSettings(settings);await this.refresh();return settings;}
  async updateSettings(idleSeconds){this.settingsGeneration++;const settings=await (await this.request('/api/edit/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({idleSeconds})})).json();this.settingsGeneration++;this.setSettings(settings);return settings;}
  get dirty(){return this.changes.length>0;}
  get conflicted(){return this.metadataConflict||[...this.problems.values()].some(value=>value==='conflict');}
@@ -73,7 +75,7 @@ export class EditingClient{
    if(changes.length&&!this.authExpired){
     for(const change of eligible)if(!await this.startEdit(change.id,{touch:false}))return;
     const leases=Object.fromEntries(eligible.map(x=>[x.id,this.leases.get(x.id)?.token]));this.committing=new Set(eligible.map(x=>x.id));this.remoteGeneration++;this.status('正在保存至 R2…');
-    try{const result=await (await this.request('/api/edit/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client:this.client,changes,leases,reason:this.reason})})).json();this.remoteGeneration++;this.etag=result.etag;for(const change of eligible){this.leases.delete(change.id);this.problems.delete(change.id);}this.rebase(result.state,changes);if(!this.dirty){this.reason='edit';this.metadataConflict=false;}await this.persist();this.status(this.dirty?'还有本地草稿待保存':'已保存并解锁','ok');}
+    try{await this.beforeSave(changes);const result=await (await this.request('/api/edit/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({client:this.client,changes,leases,reason:this.reason})})).json();this.remoteGeneration++;this.etag=result.etag;for(const change of eligible){this.leases.delete(change.id);this.problems.delete(change.id);}this.rebase(result.state,changes);if(!this.dirty){this.reason='edit';this.metadataConflict=false;}await this.persist();this.status(this.dirty?'还有本地草稿待保存':'已保存并解锁','ok');}
     catch(error){this.failure(error);await this.persist();if(error.status===409)await this.refresh().catch(()=>{});}
     finally{this.committing=null;}
    }
