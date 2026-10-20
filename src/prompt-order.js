@@ -2,7 +2,8 @@
 export const promptFolder=(state,prompt)=>state.folders.some(f=>f.id===prompt.folder)?prompt.folder:null;
 export function sortedPrompts(state,folder){
  const prompts=state.prompts.filter(p=>promptFolder(state,p)===folder),order=state.promptOrders?.find(o=>o.folder===folder),rank=new Map((order?.ids||[]).map((id,index)=>[id,index]));
- return prompts.sort((a,b)=>(rank.get(a.id)??Infinity)-(rank.get(b.id)??Infinity));
+ const treeRank=new Map((state.treeOrders?.find(o=>o.parent===folder)?.keys||[]).map((key,index)=>[key,index]));
+ return prompts.sort((a,b)=>(treeRank.get('prompt:'+a.id)??Infinity)-(treeRank.get('prompt:'+b.id)??Infinity)||(rank.get(a.id)??Infinity)-(rank.get(b.id)??Infinity));
 }
 export async function promptOrderId(folder){
  const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(folder)));
