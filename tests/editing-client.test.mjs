@@ -60,3 +60,19 @@ test('an attachment upload failure keeps the document draft and lease until a su
  await c.flush();assert.equal(f.commits,0);assert(c.dirty);assert(c.owned('email'));assert.equal(f.drafts.rows.get(c.client).changes[0].after.body,'image draft');
  ready=true;await c.flush();assert.equal(attempts,2);assert.equal(f.commits,1);assert.equal(f.cloud.prompts.find(p=>p.id==='email').body,'image draft');assert(!c.dirty);assert(!c.owned('email'));c.dispose();
 });
+
+test('revoked files remain read-only with durable drafts until manual reacquisition; other files still save',async()=>{
+ const f=fixture(),c=f.client;await c.boot();await c.startEdit('email');f.state.prompts.find(p=>p.id==='email').body='displaced local draft';c.changed();await c.persist();
+ const request=c.request;let revoked=true,automaticAttempts=0;
+ c.request=async(path,options={})=>{const body=options.body?JSON.parse(options.body):null;if(path.startsWith('/api/edit/state')){const data=await (await request(path,options)).json();return Response.json({...data,revoked:revoked?['email']:[]});}if(path==='/api/edit/lease'&&body.document==='email'){if(body.action==='acquire'){automaticAttempts++;throw Error('must not automatically reacquire');}if(body.action==='takeover'){revoked=false;return request(path,{...options,body:JSON.stringify({...body,action:'acquire'})});}}return request(path,options);};
+ await c.tick();assert.equal(c.problems.get('email'),'revoked');assert(!c.editable('email'));assert(!await c.startEdit('email'));await c.flush();assert.equal(f.commits,0);assert.equal(automaticAttempts,0);assert.equal(f.drafts.rows.get(c.client).changes[0].after.body,'displaced local draft');
+ await c.startEdit('review');f.state.prompts.find(p=>p.id==='review').body='independent draft';c.changed();await c.flush({ids:['review']});assert.equal(f.cloud.prompts.find(p=>p.id==='review').body,'independent draft');assert.equal(c.problems.get('email'),'revoked');assert(c.dirty);
+ assert(await c.takeover('email'));assert(c.editable('email'));await c.flush();assert.equal(f.cloud.prompts.find(p=>p.id==='email').body,'displaced local draft');assert(!c.dirty);
+ revoked=true;await c.refresh();f.offline();await assert.rejects(c.takeover('email'),/联网/);f.online();f.otherEdit('email','cloud changed after takeover');f.state.prompts.find(p=>p.id==='email').body='another local draft';c.changed();assert.equal(await c.takeover('email'),false,'manual takeover never bypasses a content conflict');assert.equal(f.cloud.prompts.find(p=>p.id==='email').body,'cloud changed after takeover');assert.equal(f.state.prompts.find(p=>p.id==='email').body,'another local draft');c.dispose();
+});
+
+test('a delayed revoked snapshot cannot remove a freshly acquired takeover lease',async()=>{
+ const f=fixture(),c=f.client;await c.boot();c.setRevocations(['email']);const request=c.request;
+ c.request=async(path,options={})=>{if(path.startsWith('/api/edit/state')){const revoked=c.problems.get('email')==='revoked';const data=await (await request(path,options)).json();return Response.json({...data,revoked:revoked?['email']:[]});}if(path==='/api/edit/lease'){const body=JSON.parse(options.body);if(body.action==='takeover')return request(path,{...options,body:JSON.stringify({...body,action:'acquire'})});}return request(path,options);};
+ f.hold();const reading=c.refresh();assert(await c.startEdit('email',{takeover:true}));f.releaseRead();assert.equal(await reading,null);assert(c.editable('email'));assert.equal(c.problems.get('email'),undefined);c.dispose();
+});

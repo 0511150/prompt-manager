@@ -9,7 +9,7 @@ const fail=(status,message,details={})=>Object.assign(Error(message),{status,det
 // One coordinator per workspace. Leases are independent rows per document;
 // only the short R2 snapshot commits are serialized, never the editing sessions.
 export class WorkspaceEditor extends DurableObject{
- constructor(ctx,env){super(ctx,env);this.queue=Promise.resolve();ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS edit_lease (document TEXT PRIMARY KEY, client TEXT NOT NULL, session TEXT NOT NULL, token TEXT NOT NULL, expires INTEGER NOT NULL)');ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS image_blob (id TEXT PRIMARY KEY, metadata TEXT NOT NULL, unref_since INTEGER, created INTEGER NOT NULL)');ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS history_settings (id INTEGER PRIMARY KEY, history_limit INTEGER NOT NULL)');ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS editor_settings (id INTEGER PRIMARY KEY, idle_seconds INTEGER NOT NULL)');}
+ constructor(ctx,env){super(ctx,env);this.queue=Promise.resolve();ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS edit_revocation (document TEXT NOT NULL, client TEXT NOT NULL, session TEXT NOT NULL, revoked_at INTEGER NOT NULL, PRIMARY KEY(document,client,session))');ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS edit_lease (document TEXT PRIMARY KEY, client TEXT NOT NULL, session TEXT NOT NULL, token TEXT NOT NULL, expires INTEGER NOT NULL)');ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS image_blob (id TEXT PRIMARY KEY, metadata TEXT NOT NULL, unref_since INTEGER, created INTEGER NOT NULL)');ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS history_settings (id INTEGER PRIMARY KEY, history_limit INTEGER NOT NULL)');ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS editor_settings (id INTEGER PRIMARY KEY, idle_seconds INTEGER NOT NULL)');}
  settings(){const row=this.ctx.storage.sql.exec('SELECT idle_seconds FROM editor_settings WHERE id=1').toArray()[0];const history=this.ctx.storage.sql.exec('SELECT history_limit FROM history_settings WHERE id=1').toArray()[0];return {idleSeconds:row?.idle_seconds??DEFAULT_IDLE_SECONDS,historyLimit:history?.history_limit??DEFAULT_HISTORY_LIMIT};}
  updateSettings(input){return this.run(async()=>{
   if(!input||!Object.hasOwn(input,'idleSeconds')&&!Object.hasOwn(input,'historyLimit'))throw fail(400,'设置请求无效');
@@ -24,21 +24,28 @@ export class WorkspaceEditor extends DurableObject{
  cleanupImages(){return this.run(async()=>{const env=await this.workspaceEnv();await trimHistory(env);await pruneHistory(env);return reconcileImages(env,this.ctx.storage.sql,true);});}
  run(task){const result=this.queue.then(async()=>{try{return await task();}catch(error){return {status:error.status||500,error:error.status?error.message:'保存暂时不可用，请稍后重试',...error.details};}});this.queue=result.then(()=>{});return result;}
  async workspaceEnv(){const credentials=await this.env.ACCESS_CONTROL.getByName('workspace-access').getCredentials();if(!credentials)throw fail(503,'访问密码尚未配置');return {...this.env,...credentials,HISTORY_LIMIT:this.settings().historyLimit};}
+ revoked(id,owner){return !!this.ctx.storage.sql.exec('SELECT document FROM edit_revocation WHERE document=? AND client=? AND session=?',id,owner.client,owner.session).toArray()[0];}
  lease(id){return this.ctx.storage.sql.exec('SELECT * FROM edit_lease WHERE document=?',id).toArray()[0];}
  owns(row,owner,token){return row&&row.client===owner.client&&row.session===owner.session&&row.token===token&&row.expires>Date.now();}
  releaseOwned(id,owner,token){const row=this.lease(id);if(row&&row.client===owner.client&&row.session===owner.session&&row.token===token)this.ctx.storage.sql.exec('DELETE FROM edit_lease WHERE document=?',id);}
  async scope(env){return contentVersion({id:'workspace',key:env.DATA_KEY});}
- snapshot(owner){return this.run(async()=>{const env=await this.workspaceEnv(),snapshot=await readWorkspace(env);this.ctx.storage.sql.exec('DELETE FROM edit_lease WHERE expires<=?',Date.now());const locks=this.ctx.storage.sql.exec('SELECT document,client,session,expires FROM edit_lease').toArray().map(row=>({id:row.document,until:row.expires,owned:row.client===owner.client&&row.session===owner.session}));return {state:snapshot.state,etag:snapshot.etag,workspaceId:await this.scope(env),locks,settings:this.settings()};});}
+ snapshot(owner){return this.run(async()=>{const env=await this.workspaceEnv(),snapshot=await readWorkspace(env);this.ctx.storage.sql.exec('DELETE FROM edit_lease WHERE expires<=?',Date.now());const locks=this.ctx.storage.sql.exec('SELECT document,client,session,expires FROM edit_lease').toArray().map(row=>({id:row.document,until:row.expires,owned:row.client===owner.client&&row.session===owner.session}));const revoked=this.ctx.storage.sql.exec('SELECT document FROM edit_revocation WHERE client=? AND session=?',owner.client,owner.session).toArray().map(row=>row.document);return {state:snapshot.state,etag:snapshot.etag,workspaceId:await this.scope(env),locks,revoked,settings:this.settings()};});}
  edit(action,id,owner,token,baseVersion){return this.run(async()=>{
   if(!validEditId(id))throw fail(400,'文件标识无效');
   const row=this.lease(id),now=Date.now();
   if(action==='release'){this.releaseOwned(id,owner,token);return {ok:true};}
-  if(action==='renew'){if(!this.owns(row,owner,token))throw fail(423,'编辑权已到期，请重新取得编辑权',{document:id});const until=now+LEASE_TTL_MS;this.ctx.storage.sql.exec('UPDATE edit_lease SET expires=? WHERE document=?',until,id);return {ok:true,until};}
-  if(action!=='acquire')throw fail(400,'不支持的编辑操作');
-  if(row&&row.expires>now&&(row.client!==owner.client||row.session!==owner.session))throw fail(423,'另一处正在编辑此文件，请稍后重试',{document:id,until:row.expires});
+  if(action==='renew'){if(!this.owns(row,owner,token))throw fail(423,'编辑权已失效，请手动重新取得编辑权',{document:id,revoked:true,until:row?.expires});const until=now+LEASE_TTL_MS;this.ctx.storage.sql.exec('UPDATE edit_lease SET expires=? WHERE document=?',until,id);return {ok:true,until};}
+  if(!['acquire','takeover'].includes(action))throw fail(400,'不支持的编辑操作');
+  if(action==='acquire'&&this.revoked(id,owner))throw fail(423,'此文件的编辑权已被接管，请手动重新取得编辑权',{document:id,revoked:true,until:row?.expires});
+  if(action!=='takeover'&&row&&row.expires>now&&(row.client!==owner.client||row.session!==owner.session))throw fail(423,'另一处正在编辑此文件，请稍后重试',{document:id,until:row.expires});
   const env=await this.workspaceEnv(),{state}=await readWorkspace(env),document=state.prompts.find(p=>p.id===id)||null,version=await contentVersion(document);
   if(baseVersion!==version)throw fail(409,'此文件已有新版本。本地修改已保留，请先处理版本冲突',{document:id});
-  const nextToken=this.owns(row,owner,token)?token:crypto.randomUUID(),until=Date.now()+LEASE_TTL_MS;
+  if(action==='takeover'){
+   this.ctx.storage.sql.exec('DELETE FROM edit_revocation WHERE revoked_at<?',now-24*60*60*1000);
+   if(row&&row.expires>now&&(row.client!==owner.client||row.session!==owner.session))this.ctx.storage.sql.exec('INSERT OR REPLACE INTO edit_revocation(document,client,session,revoked_at) VALUES(?,?,?,?)',id,row.client,row.session,now);
+   this.ctx.storage.sql.exec('DELETE FROM edit_revocation WHERE document=? AND client=? AND session=?',id,owner.client,owner.session);
+  }
+  const nextToken=action!=='takeover'&&this.owns(row,owner,token)?token:crypto.randomUUID(),until=Date.now()+LEASE_TTL_MS;
   this.ctx.storage.sql.exec('INSERT OR REPLACE INTO edit_lease(document,client,session,token,expires) VALUES(?,?,?,?,?)',id,owner.client,owner.session,nextToken,until);
   return {ok:true,token:nextToken,until,version};
  });}
@@ -49,7 +56,7 @@ export class WorkspaceEditor extends DurableObject{
    const previous=await readWorkspace(env),next=structuredClone(previous.state);
    for(const change of changes){const current=next[change.group].find(item=>item.id===change.id)||null;if(sameItem(change.group,current,change.after))continue;
     if(!sameItem(change.group,current,change.before))throw fail(409,change.group==='prompts'?'此文件已有新版本，本地草稿不会覆盖云端':'其他位置已修改同一项设置，请先保留本地备份再读取云端',{document:change.group==='prompts'?change.id:null,group:change.group});
-    if(change.group==='prompts'&&!this.owns(this.lease(change.id),owner,proofs[change.id]))throw fail(423,'保存前需要重新取得此文件的编辑权',{document:change.id});
+    if(change.group==='prompts'&&!this.owns(this.lease(change.id),owner,proofs[change.id]))throw fail(423,'保存前需要重新取得此文件的编辑权',{document:change.id,revoked:true});
     putItem(next,change.group,change.id,change.after);
    }
    next.tabs=next.tabs.filter(id=>next.prompts.some(p=>p.id===id));if(!next.tabs.includes(next.active))next.active=next.tabs[0]||null;

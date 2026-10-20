@@ -22,7 +22,18 @@ export class ImagePanels{
  async zip(id,el){const p=this.state().prompts.find(p=>p.id===id);if(!p)return;el.disabled=true;try{const blob=await this.images.zip(promptImages(p));this.download(blob,(p.title||'Prompt').replace(/[<>:"/\\|?*]/g,'_')+'-图片.zip');this.toast('已下载 ZIP · 原图仅打包');}finally{if(el.isConnected)el.disabled=false;}}
  async downloadOne(id,el){const image=this.state().prompts.find(p=>p.id===el.dataset.prompt)?.images?.find(i=>i.id===id);if(image)this.download(await this.images.blob(id),image.name);}
  async remove(id,el){const pid=el.dataset.prompt;if(!await this.ensure([pid]))return;const p=this.state().prompts.find(p=>p.id===pid);if(!p)return;for(const token of imageTokens(p.body).filter(t=>t.id===id))p.body=p.body.replaceAll(token.raw,'');p.images=(p.images||[]).filter(i=>i.id!==id);p.updated=Date.now();this.changed();this.render();this.gallery(pid);}
- async rename(id,el){const pid=el.dataset.prompt;if(!await this.ensure([pid]))return;const p=this.state().prompts.find(p=>p.id===pid),image=p?.images?.find(i=>i.id===id);if(!image)return;this.nameDialog('图片名称',image.name,name=>{image.name=uniqueImageName(name,p.images.filter(i=>i.id!==id),image.type);for(const token of imageTokens(p.body).filter(t=>t.id===id))p.body=p.body.replaceAll(token.raw,'!['+image.name+']('+imageUrl(id)+')');p.updated=Date.now();this.changed();this.render();});}
+ async rename(id,el){
+  const pid=el.dataset.prompt;if(!await this.ensure([pid])||!el.isConnected)return;
+  const p=this.state().prompts.find(p=>p.id===pid),image=p?.images?.find(i=>i.id===id),caption=el.closest('figcaption'),label=caption?.querySelector('strong');if(!image||!label)return;
+  const input=document.createElement('input');input.type='text';input.value=image.name;input.maxLength=120;input.dataset.imageRename=id;input.className='image-name-input';input.setAttribute('aria-label','图片名称');input.autocomplete='off';label.replaceWith(input);el.disabled=true;let finishing=false;
+  const finish=async(cancel=false)=>{
+   if(finishing)return;finishing=true;
+   try{const name=input.value.trim();if(!cancel&&name&&name!==image.name){if(!await this.ensure([pid]))return;const prompt=this.state().prompts.find(p=>p.id===pid),item=prompt?.images?.find(i=>i.id===id);if(!item)return;item.name=uniqueImageName(name,prompt.images.filter(i=>i.id!==id),item.type);for(const token of imageTokens(prompt.body).filter(t=>t.id===id))prompt.body=prompt.body.replaceAll(token.raw,'!['+item.name+']('+imageUrl(id)+')');prompt.updated=Date.now();this.changed();this.render();}}
+   catch(error){this.toast(error.message||'图片名称未保存');}
+   finally{const name=this.state().prompts.find(p=>p.id===pid)?.images?.find(i=>i.id===id)?.name||image.name;label.textContent=name;label.title=name;input.replaceWith(label);el.disabled=false;el.setAttribute('aria-label','重命名 '+name);const img=caption.closest('figure')?.querySelector('img');if(img)img.alt=name;}
+  };
+  input.addEventListener('keydown',event=>{if(event.isComposing)return;if(event.key==='Enter'||event.key==='Escape'){event.preventDefault();event.stopPropagation();void finish(event.key==='Escape');}});input.addEventListener('blur',()=>void finish());input.focus({preventScroll:true});input.setSelectionRange(0,image.name.lastIndexOf('.')>0?image.name.lastIndexOf('.'):image.name.length);
+ }
  async trash(){
   this.modal(this.header('图片回收站')+'<p id="image-trash-loading" class="inline-note">正在加载…</p>');const marker=document.querySelector('#image-trash-loading');
   const data=await (await this.request('/api/images/trash')).json();if(!marker.isConnected||!document.querySelector('#modal').open)return;this.trashItems=data.items;const {button,esc}=this;
